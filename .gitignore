@@ -1,3 +1,5 @@
 MacMonitor.app/
+MacMonitor.zip
+.build/
 .DS_Store
 *.dSYM/

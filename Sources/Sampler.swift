@@ -228,11 +228,14 @@ final class Monitor: ObservableObject {
 
     static func readVolumes() -> [VolumeInfo] {
         let keys: [URLResourceKey] = [.volumeNameKey, .volumeTotalCapacityKey,
-                                      .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
+                                      .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
+                                      .volumeIsReadOnlyKey]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys,
                                                          options: [.skipHiddenVolumes]) ?? []
         return urls.compactMap { url in
-            guard let v = try? url.resourceValues(forKeys: Set(keys)), let total = v.volumeTotalCapacity, total > 0
+            // Skip read-only volumes such as mounted installer disk images (always "full").
+            guard let v = try? url.resourceValues(forKeys: Set(keys)), let total = v.volumeTotalCapacity, total > 0,
+                  v.volumeIsReadOnly != true || url.path == "/"
             else { return nil }
             let avail = v.volumeAvailableCapacityForImportantUsage.map { UInt64($0) }
                 ?? UInt64(v.volumeAvailableCapacity ?? 0)
