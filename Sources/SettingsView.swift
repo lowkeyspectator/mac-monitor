@@ -45,6 +45,10 @@ struct GeneralSettings: View {
     }
 
     private func setLaunchAtLogin(_ on: Bool) {
+        // Ignore changes that already match the system state, including the revert below
+        // after a failure, so a failed register() isn't followed by a spurious unregister().
+        let status = SMAppService.mainApp.status
+        guard on != (status == .enabled || status == .requiresApproval) else { return }
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             loginMessage.value = SMAppService.mainApp.status == .requiresApproval

@@ -18,7 +18,7 @@ A lightweight, native macOS system monitor for the menu bar, written in SwiftUI.
   - **GPU:** device, renderer and tiler utilisation, a history graph, and the memory the GPU is using.
   - **Memory:** a split bar of CPU/apps, GPU and free memory, plus app, wired, compressed and cached memory, swap and memory pressure.
   - **Storage:** every writable mounted volume.
-- **Desktop widget (optional):** a widget-style panel that can sit on the desktop behind your windows, float above them, or behave like a normal window. It shows rings when collapsed and the full panel when expanded. Hover over it for the expand, settings and close buttons. Click a ring to jump straight to that section's details.
+- **Desktop widget (optional):** a widget-style panel that can sit on the desktop behind your windows, float above them, or behave like a normal window. It shows rings when collapsed and the full panel when expanded. Drag it from anywhere on it to put it wherever you like, on any screen; it remembers its position the next time it opens. Hover over it for the expand, settings and close buttons. Click a ring to jump straight to that section's details.
 
   <img src="docs/widget-compact-dark.png" width="340" alt="Collapsed widget">
 

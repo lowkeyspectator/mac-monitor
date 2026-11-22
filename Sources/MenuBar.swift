@@ -119,6 +119,11 @@ struct MenuPanel: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openSettings) private var openSettings
     @AppStorage("showWidget") private var showWidget = false
+    // Observed so the expand/collapse-all icon updates as soon as a card changes.
+    @AppStorage("popover.cpu") private var cpuOpen = false
+    @AppStorage("popover.gpu") private var gpuOpen = false
+    @AppStorage("popover.memory") private var memoryOpen = false
+    @AppStorage("popover.storage") private var storageOpen = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -134,7 +139,7 @@ struct MenuPanel: View {
     }
 
     private var header: some View {
-        let allOpen = UsagePanel.allExpanded(prefix: "popover")
+        let allOpen = cpuOpen && gpuOpen && memoryOpen && storageOpen
         return HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Mac Monitor").font(.system(size: 13, weight: .semibold))

@@ -8,7 +8,7 @@ struct MacMonitorApp: App {
     init() { Snapshot.runIfRequested() }
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: .constant(!Snapshot.isActive)) {
             MenuPanel().environmentObject(monitor)
         } label: {
             StatusLabel(m: monitor)
@@ -20,9 +20,10 @@ struct MacMonitorApp: App {
         }
         .windowStyle(.plain)
         .windowResizability(.contentSize)
+        .windowBackgroundDragBehavior(.enabled)
         .defaultPosition(.topTrailing)
         .restorationBehavior(.disabled)
-        .defaultLaunchBehavior(UserDefaults.standard.bool(forKey: "showWidget") ? .presented : .suppressed)
+        .defaultLaunchBehavior(!Snapshot.isActive && UserDefaults.standard.bool(forKey: "showWidget") ? .presented : .suppressed)
 
         Settings {
             SettingsView().environmentObject(monitor)

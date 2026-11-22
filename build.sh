@@ -6,7 +6,7 @@
 #   ./build.sh --zip      also create MacMonitor.zip for distribution
 set -e
 cd "$(dirname "$0")"
-VERSION=1.1.0
+VERSION=1.2.0
 APP=MacMonitor.app
 BUILD=.build
 rm -rf "$APP" "$BUILD"
@@ -44,7 +44,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null 2>&1
+codesign --force --sign - "$APP" >/dev/null || { echo "error: codesign failed (see message above)" >&2; exit 1; }
 echo "Built $(pwd)/$APP (version $VERSION)"
 
 if [[ "$1" == "--zip" ]]; then

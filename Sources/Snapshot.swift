@@ -5,10 +5,12 @@ import AppKit
 /// main views to PNG files (light and dark) and exits. Handy for README screenshots.
 enum Snapshot {
     @MainActor static var monitor: Monitor?
+    /// True when launched with --snapshot; the app then shows no menu bar item or widget.
+    static let isActive = CommandLine.arguments.contains("--snapshot")
 
     static func runIfRequested() {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--snapshot") else { return }
+        guard isActive, let i = args.firstIndex(of: "--snapshot") else { return }
         let dir = URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : ".")
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
@@ -28,10 +30,9 @@ enum Snapshot {
             let suffix = scheme == .dark ? "dark" : "light"
             let bg = scheme == .dark ? Color(white: 0.16) : Color(white: 0.95)
 
-            save(VStack(spacing: 10) {
-                Text("Collapsed").font(.caption).foregroundStyle(.secondary)
-                PanelPreview(prefix: "snap.collapsed")
-            }, m, scheme, bg, dir.appendingPathComponent("panel-collapsed-\(suffix).png"))
+            UsagePanel.setAll(false, prefix: "snap.collapsed")
+            save(PanelPreview(prefix: "snap.collapsed"), m, scheme, bg,
+                 dir.appendingPathComponent("panel-collapsed-\(suffix).png"))
 
             UsagePanel.setAll(true, prefix: "snap.expanded")
             save(PanelPreview(prefix: "snap.expanded"), m, scheme, bg,
@@ -53,7 +54,10 @@ enum Snapshot {
                 }
             }
         }.padding(12), m, .light, .white, dir.appendingPathComponent("menubar-styles.png"))
-        UsagePanel.setAll(false, prefix: "snap.expanded")
+        // Leave no snapshot-only keys behind in the user's preferences.
+        for prefix in ["snap.collapsed", "snap.expanded"] {
+            for k in Metric.allCases { UserDefaults.standard.removeObject(forKey: "\(prefix).\(k.rawValue)") }
+        }
         print("Snapshots written to \(dir.path)")
     }
 

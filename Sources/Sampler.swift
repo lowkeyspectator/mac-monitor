@@ -4,7 +4,9 @@ import IOKit
 
 // MARK: - Raw readers (no private APIs, no root needed)
 
-struct CPUTicks { var user, system, idle, nice: UInt64 }
+/// Raw 32-bit kernel tick counters. Deltas must be taken in UInt32 (`&-`) so a counter
+/// that wraps past 2^32 still gives the right difference.
+struct CPUTicks { var user, system, idle, nice: UInt32 }
 
 enum Sys {
     static func sysctlInt(_ name: String) -> Int? {
@@ -35,7 +37,7 @@ enum Sys {
         }
         let n = Int(CPU_STATE_MAX)
         return (0..<Int(numCPU)).map { i in
-            func t(_ s: Int32) -> UInt64 { UInt64(UInt32(bitPattern: info[i * n + Int(s)])) }
+            func t(_ s: Int32) -> UInt32 { UInt32(bitPattern: info[i * n + Int(s)]) }
             return CPUTicks(user: t(CPU_STATE_USER), system: t(CPU_STATE_SYSTEM),
                             idle: t(CPU_STATE_IDLE), nice: t(CPU_STATE_NICE))
         }
@@ -144,7 +146,7 @@ final class Monitor: ObservableObject {
 
     private var lastTicks: [CPUTicks] = []
     private var timer: Timer?
-    private var tick = 0
+    private var lastVolumeRefresh = Date.distantPast
 
     private var interval: Double = 0
 
@@ -182,9 +184,9 @@ final class Monitor: ObservableObject {
             var cores: [Double] = []
             var tu: UInt64 = 0, ts: UInt64 = 0, tAll: UInt64 = 0
             for (a, b) in zip(lastTicks, now) {
-                let u = (b.user &- a.user) + (b.nice &- a.nice)
-                let s = b.system &- a.system
-                let all = u + s + (b.idle &- a.idle)
+                let u = UInt64(b.user &- a.user) + UInt64(b.nice &- a.nice)
+                let s = UInt64(b.system &- a.system)
+                let all = u + s + UInt64(b.idle &- a.idle)
                 cores.append(all > 0 ? Double(u + s) / Double(all) : 0)
                 tu += u; ts += s; tAll += all
             }
@@ -221,9 +223,11 @@ final class Monitor: ObservableObject {
         memory = m
         push(m.fraction, to: &memHistory)
 
-        // Storage (every 10 s is plenty)
-        if tick % 10 == 0 { volumes = Self.readVolumes() }
-        tick += 1
+        // Storage: every 10 seconds of wall-clock time, whatever the sample interval.
+        if Date().timeIntervalSince(lastVolumeRefresh) >= 10 {
+            volumes = Self.readVolumes()
+            lastVolumeRefresh = Date()
+        }
     }
 
     static func readVolumes() -> [VolumeInfo] {

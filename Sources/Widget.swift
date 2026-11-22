@@ -53,9 +53,11 @@ struct WidgetView: View {
             controls.padding(10).opacity(hovering.value ? 1 : 0)
         }
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering.value = h } }
+        // Dragging anywhere on the widget moves it — handled by WindowConfigurator.
         .background(WindowConfigurator(level: WidgetLevel(rawValue: level) ?? .desktop))
+        // showWidget is cleared by WindowConfigurator when the window actually closes,
+        // not in onDisappear, so quitting the app with the widget open keeps it open next launch.
         .onAppear { showWidget = true }
-        .onDisappear { showWidget = false }
     }
 
     private var compact: some View {
@@ -64,6 +66,7 @@ struct WidgetView: View {
                 Ring(value: m.value(metric), label: metric.title, detail: compactDetail(metric), color: metric.tint)
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        guard !WidgetDrag.justDragged else { return }
                         UserDefaults.standard.set(true, forKey: "widget.\(metric.rawValue)")
                         withAnimation(.snappy(duration: 0.3)) { expanded = true }
                     }
@@ -100,7 +103,9 @@ struct WidgetView: View {
 struct CircleButton: View {
     var symbol: String, help: String, action: () -> Void
     var body: some View {
-        Button(action: action) {
+        Button {
+            if !WidgetDrag.justDragged { action() }
+        } label: {
             Image(systemName: symbol)
                 .font(.system(size: 9, weight: .bold))
                 .frame(width: 20, height: 20)
@@ -123,23 +128,91 @@ struct VisualEffectBackground: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
-/// Makes the hosting window transparent, sets its level and lets it be dragged by its background.
+/// Remembers when a drag of the widget ended, so the mouse-up that finishes a drag
+/// isn't also treated as a click on a ring or button.
+enum WidgetDrag {
+    nonisolated(unsafe) static var lastEnd = Date.distantPast
+    static var justDragged: Bool { Date().timeIntervalSince(lastEnd) < 0.3 }
+}
+
+/// Makes the hosting window transparent, sets its level and lets the user drag it from anywhere.
+/// Settings are applied only when the window or level changes, not on every data refresh.
 struct WindowConfigurator: NSViewRepresentable {
     var level: WidgetLevel
+
+    final class Coordinator {
+        weak var window: NSWindow?
+        var level: WidgetLevel?
+        var closeObserver: NSObjectProtocol?
+        var dragMonitor: Any?
+        var downMouse: NSPoint?
+        var downOrigin: NSPoint?
+        var dragging = false
+
+        /// Borderless SwiftUI windows don't move with isMovableByWindowBackground or
+        /// WindowDragGesture, so move the window ourselves once the mouse travels 3 pt.
+        func installDragMonitor() {
+            guard dragMonitor == nil else { return }
+            dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] e in
+                guard let self, let w = self.window, e.window === w else { return e }
+                switch e.type {
+                case .leftMouseDown:
+                    downMouse = NSEvent.mouseLocation
+                    downOrigin = w.frame.origin
+                    dragging = false
+                case .leftMouseDragged:
+                    guard let m0 = downMouse, let o0 = downOrigin else { return e }
+                    let p = NSEvent.mouseLocation
+                    let dx = p.x - m0.x, dy = p.y - m0.y
+                    if !dragging && hypot(dx, dy) < 3 { return e }
+                    dragging = true
+                    w.setFrameOrigin(NSPoint(x: o0.x + dx, y: o0.y + dy))
+                    return nil
+                case .leftMouseUp:
+                    if dragging { WidgetDrag.lastEnd = Date() }
+                    downMouse = nil
+                    dragging = false
+                default: break
+                }
+                return e
+            }
+        }
+
+        deinit {
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+            if let dragMonitor { NSEvent.removeMonitor(dragMonitor) }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSView { NSView() }
+
     func updateNSView(_ v: NSView, context: Context) {
-        let level = level
+        let level = level, c = context.coordinator
         DispatchQueue.main.async {
-            guard let w = v.window else { return }
-            w.isOpaque = false
-            w.backgroundColor = .clear
-            w.hasShadow = true
-            w.isMovableByWindowBackground = true
+            guard let w = v.window, w !== c.window || level != c.level else { return }
+            if w !== c.window {
+                w.isOpaque = false
+                w.backgroundColor = .clear
+                w.hasShadow = true
+                w.isMovableByWindowBackground = true
+                // Remember where the user dragged it; restores that position on next launch.
+                w.setFrameAutosaveName("MacMonitorWidget")
+                if let old = c.closeObserver { NotificationCenter.default.removeObserver(old) }
+                // Closing the widget (close button, ⌘W, Settings toggle) turns it off for next launch.
+                c.closeObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
+                    UserDefaults.standard.set(false, forKey: "showWidget")
+                }
+                c.window = w
+                c.installDragMonitor()
+            }
             w.level = level.nsLevel
             w.collectionBehavior = level == .desktop
                 ? [.canJoinAllSpaces, .stationary, .ignoresCycle]
                 : [.canJoinAllSpaces, .fullScreenAuxiliary]
             w.invalidateShadow()
+            c.level = level
         }
     }
 }
