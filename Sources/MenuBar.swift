@@ -154,6 +154,7 @@ struct MenuPanel: View {
             }
             .buttonStyle(.borderless)
             .help(allOpen ? "Collapse all" : "Show all details")
+            .accessibilityLabel(allOpen ? "Collapse all" : "Show all details")
         }
     }
 
@@ -169,8 +170,10 @@ struct MenuPanel: View {
                 openSettings()
             }
             .help("Settings…")
+            .accessibilityLabel("Settings")
             FooterButton(title: nil, symbol: "power") { NSApp.terminate(nil) }
                 .help("Quit Mac Monitor")
+                .accessibilityLabel("Quit Mac Monitor")
         }
     }
 }
