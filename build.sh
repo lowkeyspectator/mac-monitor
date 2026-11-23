@@ -6,7 +6,7 @@
 #   ./build.sh --zip      also create MacMonitor.zip for distribution
 set -e
 cd "$(dirname "$0")"
-VERSION=1.3.0
+VERSION=1.4.0
 APP=MacMonitor.app
 BUILD=.build
 rm -rf "$APP" "$BUILD"
@@ -40,6 +40,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>LSUIElement</key><true/>
+  <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSSupportsSuddenTermination</key><false/>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

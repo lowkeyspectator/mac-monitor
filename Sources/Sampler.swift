@@ -148,6 +148,8 @@ final class Monitor: ObservableObject {
     @Published var topEnergy: [UsageRow] = []
     @Published var battery = BatteryInfo()
     @Published var system = SystemInfo()
+    @Published var energyMode: EnergyMode?
+    @Published var energyModeError: String?
 
     /// Called after every sample (used by the alert engine).
     var onSample: ((Monitor) -> Void)?
@@ -200,6 +202,7 @@ final class Monitor: ObservableObject {
         default: break
         }
         if visible { lastSlowRefresh = .distantPast }     // load the list right away
+        if visible && metric == .battery { refreshEnergyMode() }
         if n == 0 {
             switch metric {
             case .network: topNetwork = []
@@ -214,6 +217,20 @@ final class Monitor: ObservableObject {
     private func detailVisible(_ m: Metric) -> Bool { (detailRefs[m] ?? 0) > 0 }
 
     func stopStreams() { netStream.stop(); energyStream.stop() }
+
+    func refreshEnergyMode() {
+        DispatchQueue.global(qos: .utility).async {
+            let mode = EnergyModeControl.current()
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.energyMode = mode } }
+        }
+    }
+
+    /// Changes the energy mode (shows the macOS administrator prompt), then re-reads it.
+    func setEnergyMode(_ mode: EnergyMode) {
+        guard mode != energyMode else { return }
+        energyModeError = EnergyModeControl.set(mode)
+        refreshEnergyMode()
+    }
 
     private var interval: Double = 0
 

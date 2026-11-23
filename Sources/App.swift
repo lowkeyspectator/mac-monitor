@@ -48,8 +48,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated(unsafe) static var showSettingsAtLaunch = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A menu bar app must keep running with no windows open; macOS must not quit it to save resources.
+        ProcessInfo.processInfo.disableAutomaticTermination("Mac Monitor lives in the menu bar")
+        ProcessInfo.processInfo.disableSuddenTermination()
         if Self.showSettingsAtLaunch { showSettings() }
     }
+
+    /// SwiftUI otherwise quits the app when its last window closes — including the menu bar panel,
+    /// which closes whenever you click elsewhere. That was the "crash".
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MenuBarItem.restore()

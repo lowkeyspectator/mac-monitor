@@ -143,8 +143,14 @@ struct MetricCard: View {
                 }
                 Spacer(minLength: 4)
                 // The value always shows in full; the subtitle truncates first.
-                Text(valueText).font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit().lineLimit(1).fixedSize()
+                Group {
+                    if [.cpu, .gpu, .battery].contains(metric) {
+                        FixedSlot(text: valueText, widest: "100%")
+                    } else {
+                        Text(valueText).monospacedDigit().lineLimit(1)
+                    }
+                }
+                .font(.system(size: 13, weight: .semibold)).fixedSize()
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.tertiary)
@@ -330,6 +336,24 @@ struct MetricCard: View {
         if let t = b.temperature { rows.append(("Temperature", String(format: "%.1f °C", t), nil)) }
         if let w = b.adapterWatts { rows.append(("Power adapter", "\(w) W", nil)) }
         return VStack(alignment: .leading, spacing: 8) {
+            if let mode = m.energyMode {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Energy mode").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Picker("Energy mode", selection: Binding(get: { mode }, set: { m.setEnergyMode($0) })) {
+                        ForEach(EnergyMode.allCases.filter { $0 != .high || EnergyModeControl.supportsHighPower }) {
+                            Text($0.title).tag($0)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    Text(m.energyModeError ?? "Applies on battery and on power adapter. Changing it asks for your administrator password.")
+                        .font(.caption2)
+                        .foregroundStyle(m.energyModeError == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.orange))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider()
+            }
             DetailGrid(rows: rows)
             ProcessList(title: "Top apps by energy impact", rows: m.topEnergy, note: "same scale as Activity Monitor")
         }
@@ -530,7 +554,8 @@ struct Ring: View {
                 Circle().trim(from: 0, to: max(0.001, min(1, value)))
                     .stroke(color.gradient, style: StrokeStyle(lineWidth: 7, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                Text(pct(value)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+                FixedSlot(text: pct(value), widest: "100%", alignment: .center)
+                    .font(.system(size: 13, weight: .semibold))
             }
             .frame(width: size, height: size)
             Text(label).font(.system(size: 11, weight: .semibold))

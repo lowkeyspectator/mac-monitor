@@ -93,60 +93,74 @@ struct StatusLabelContent: View {
     }
 
     @ViewBuilder private func cell(_ item: LabelItem) -> some View {
-        let value = Text(pct(item.value)).monospacedDigit()
+        // Every number sits in a fixed-width slot, so the menu bar doesn't shift as digits change.
+        let value = FixedSlot(text: pct(item.value), widest: "100%")
         if item.metric == .network {
             // Upload over download, like Stats and iStat Menus; same in every style.
             HStack(spacing: 2) {
                 if style == .icon { Image(systemName: "network").font(.system(size: 10, weight: .medium)) }
                 VStack(alignment: .trailing, spacing: -2) {
-                    Text("\(fmtRateShort(item.up)) ↑")
-                    Text("\(fmtRateShort(item.down)) ↓")
+                    FixedSlot(text: "\(fmtRateShort(item.up)) ↑", widest: "888K ↑")
+                    FixedSlot(text: "\(fmtRateShort(item.down)) ↓", widest: "888K ↓")
                 }
-                .font(.system(size: 9, weight: .semibold)).monospacedDigit()
-                .frame(minWidth: 34, alignment: .trailing)
+                .font(.system(size: 9, weight: .semibold))
             }
         } else {
             switch style {
-        case .percent:
-            value.font(.system(size: 12, weight: .medium))
-        case .icon:
-            HStack(spacing: 3) {
-                Image(systemName: item.metric.symbol).font(.system(size: 11, weight: .medium))
+            case .percent:
                 value.font(.system(size: 12, weight: .medium))
-            }
-        case .stacked:
-            stacked(item, value)
-        case .bars:
-            HStack(spacing: 3) {
-                ZStack(alignment: .bottom) {
-                    RoundedRectangle(cornerRadius: 1.5).fill(.black.opacity(0.3))
-                    RoundedRectangle(cornerRadius: 1.5).fill(.black)
-                        .frame(height: max(1.5, 16 * min(max(item.value, 0), 1)))
+            case .icon:
+                HStack(spacing: 3) {
+                    Image(systemName: item.metric.symbol).font(.system(size: 11, weight: .medium))
+                    value.font(.system(size: 12, weight: .medium))
                 }
-                .frame(width: 5, height: 16)
+            case .stacked:
                 stacked(item, value)
-            }
-        case .graph:
-            HStack(spacing: 3) {
-                stacked(item, value)
-                if item.metric == .storage {
-                    EmptyView()
-                } else {
-                    Sparkline(values: item.history, color: .black, lineWidth: 1, capacity: 30)
-                        .frame(width: 30, height: 15)
-                        .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(0.35), lineWidth: 0.5))
+            case .bars:
+                HStack(spacing: 3) {
+                    ZStack(alignment: .bottom) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(.black.opacity(0.3))
+                        RoundedRectangle(cornerRadius: 1.5).fill(.black)
+                            .frame(height: max(1.5, 16 * min(max(item.value, 0), 1)))
+                    }
+                    .frame(width: 5, height: 16)
+                    stacked(item, value)
+                }
+            case .graph:
+                HStack(spacing: 3) {
+                    stacked(item, value)
+                    if item.metric != .storage {
+                        Sparkline(values: item.history, color: .black, lineWidth: 1, capacity: 30)
+                            .frame(width: 30, height: 15)
+                            .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(0.35), lineWidth: 0.5))
+                    }
                 }
             }
-        }
         }
     }
 
-    private func stacked(_ item: LabelItem, _ value: Text) -> some View {
-        VStack(alignment: .leading, spacing: -1) {
+    private func stacked(_ item: LabelItem, _ value: FixedSlot) -> some View {
+        VStack(alignment: .trailing, spacing: -1) {
             Text(item.metric.shortName).font(.system(size: 7.5, weight: .bold))
+                .frame(maxWidth: .infinity, alignment: .leading)
             value.font(.system(size: 11, weight: .semibold))
         }
-        .frame(minWidth: 26, alignment: .leading)
+        .fixedSize()
+    }
+}
+
+/// Text that always takes the width of `widest`, right-aligned, with fixed-width digits —
+/// so values like 9% → 10% → 100% don't make the layout jump.
+struct FixedSlot: View {
+    var text: String, widest: String
+    var alignment: Alignment = .trailing
+    var body: some View {
+        ZStack(alignment: alignment) {
+            Text(widest).hidden()
+            Text(text)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
     }
 }
 
