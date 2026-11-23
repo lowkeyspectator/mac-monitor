@@ -122,7 +122,7 @@ final class StreamCollector: @unchecked Sendable {
             guard let self, !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
             self.consume(s)
         }
-        do { try p.run(); process = p; self.pipe = pipe } catch { process = nil }
+        do { try p.runHelper(); process = p; self.pipe = pipe } catch { process = nil }
     }
 
     func stop() {
@@ -184,7 +184,7 @@ final class RepeatingCommand: @unchecked Sendable {
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { return }
+            guard (try? p.runHelper()) != nil else { return }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             if isCurrent(gen), let text = String(data: data, encoding: .utf8) {
@@ -207,8 +207,9 @@ enum NetProcessParser {
             let f = line.split(separator: ",", omittingEmptySubsequences: false)
             guard f.count >= 3, let dot = f[0].lastIndex(of: "."),
                   let pid = Int32(f[0][f[0].index(after: dot)...]),
-                  let rx = Double(f[1]), let tx = Double(f[2]), rx + tx > 0 else { return nil }
+                  let rx = Double(f[1]), let tx = Double(f[2]), (rx + tx) / seconds >= 100 else { return nil }
             let down = rx / seconds, up = tx / seconds
+            guard !isOwnHelper(pid) else { return nil }
             let name = processName(pid) ?? String(f[0][..<dot])
             return UsageRow(pid: pid, name: name, value: down + up, text: "↓ \(fmtRate(down))  ↑ \(fmtRate(up))")
         }
@@ -224,7 +225,8 @@ enum EnergyParser {
         for line in lines {
             let f = line.split(separator: " ", omittingEmptySubsequences: true)
             if f.first == "PID" { inTable = true; continue }
-            guard inTable, f.count >= 3, let pid = Int32(f[0]), let power = Double(f[f.count - 1]), power > 0 else { continue }
+            guard inTable, f.count >= 3, let pid = Int32(f[0]), let power = Double(f[f.count - 1]), power > 0,
+                  !isOwnHelper(pid) else { continue }
             let name = processName(pid) ?? f[1..<(f.count - 1)].joined(separator: " ")
             rows.append(UsageRow(pid: pid, name: name, value: power, text: String(format: "%.1f", power)))
         }

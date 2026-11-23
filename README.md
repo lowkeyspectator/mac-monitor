@@ -21,7 +21,9 @@ A lightweight, native macOS system monitor for the menu bar, written in SwiftUI.
   - **Network:** download and upload speed with a graph, interface, local IP address, totals since startup, and the **top apps by network traffic**.
   - **Battery** (on Macs that have one): level, charging state and time remaining, cycle count, maximum capacity, condition, power adapter, the **top apps by energy impact** (the same figure Activity Monitor shows), and an **Energy Mode switch: Automatic, Low Power or High Power** (High Power on Max-chip MacBook Pros). Automatic is macOS's default. Changing the mode asks for your administrator password, because macOS offers no other way for apps to change it.
 - **Steady layout:** numbers use fixed-width slots, so the menu bar item and panel don't shift when a value goes from one to two or three digits.
-- **Per-app lists are collected only while their card is expanded**, so Mac Monitor stays light (about 2–4% of one core) the rest of the time.
+- **Per-app lists are collected only while their card is expanded**, so Mac Monitor stays light the rest of the time.
+- **Light:** about 2–3% of one CPU core and about 25–45 MB of memory with half-second updates. The menu bar item is drawn with plain AppKit drawing, not by rendering SwiftUI to an image, which on its own held about 200 MB of graphics memory.
+- **Accurate, and checked against macOS's own tools:** per-app CPU is the CPU time used between two samples (as in Activity Monitor), per-app memory is the physical footprint where macOS allows reading it, and Mac Monitor's own helper processes are left out of every list. Memory, disk, battery, network totals and GPU values match `vm_stat`, `df`, `pmset`, `netstat` and `ioreg`.
 - **Alerts:** optional macOS notifications for sustained high CPU, memory pressure, low disk space, low battery, or the Mac running hot. Set the limits in Settings › Alerts.
 - **Desktop widget (optional):** a widget-style panel that can sit on the desktop behind your windows, float above them, or behave like a normal window. It shows rings when collapsed and the full panel when expanded. Drag it from anywhere on it to put it wherever you like, on any screen; it remembers its position the next time it opens. Hover over it for the expand, settings and close buttons. Click a ring to jump straight to that section's details.
 
@@ -68,10 +70,11 @@ open MacMonitor.app
 
 `./build.sh --zip` also creates `MacMonitor.zip` for a release. Apps you build yourself aren't quarantined, so step 3 above doesn't apply to them.
 
-The views can be rendered to PNG files without opening any windows. This is how the screenshots above were made:
+Two developer modes run without showing any UI:
 
 ```bash
-MacMonitor.app/Contents/MacOS/MacMonitor --snapshot docs/
+MacMonitor.app/Contents/MacOS/MacMonitor --snapshot docs/   # render the views to PNG (the screenshots above)
+MacMonitor.app/Contents/MacOS/MacMonitor --dump             # print every value after 8 s, to compare with top, vm_stat, pmset, df, netstat
 ```
 
 ## Project layout
@@ -83,6 +86,7 @@ MacMonitor.app/Contents/MacOS/MacMonitor --snapshot docs/
 | `Sources/Collectors.swift` | Per-app GPU time, disk I/O, network (`nettop`) and energy (`top`) |
 | `Sources/Alerts.swift` | Threshold alerts as macOS notifications |
 | `Sources/Prefs.swift` | Default preferences |
+| `Sources/EnergyMode.swift` | Energy Mode read (pmset) and change (admin prompt) |
 | `Sources/Panel.swift` | Expandable metric cards and the shared UI pieces (bars, rings, sparklines) |
 | `Sources/MenuBar.swift` | Menu bar label rendering and the menu bar panel |
 | `Sources/Widget.swift` | Desktop widget window |

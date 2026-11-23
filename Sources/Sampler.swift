@@ -176,6 +176,8 @@ final class Monitor: ObservableObject {
     private var detailRefs: [Metric: Int] = [:]
     private var lastGPUTimes: [Int32: (name: String, ns: UInt64)] = [:]
     private var lastDiskTotals: [Int32: (read: UInt64, write: UInt64)] = [:]
+    private var lastCPUTimes: [Int32: Double] = [:]
+    private var lastCPUTimesAt = Date.distantPast
     private var lastPerProcessTime = Date()
     // nettop: two samples 2 s apart, delta mode; repeated while the Network card is open.
     private lazy var netStream = RepeatingCommand(
@@ -218,6 +220,14 @@ final class Monitor: ObservableObject {
 
     func stopStreams() { netStream.stop(); energyStream.stop() }
 
+    private func resetBaselines() {
+        lastTicks = Sys.cpuTicks()
+        lastNet = nil; lastDisk = nil
+        lastSampleTime = Date()
+        lastCPUTimes = [:]; lastGPUTimes = [:]; lastDiskTotals = [:]
+        lastSlowRefresh = .distantPast; lastVolumeRefresh = .distantPast
+    }
+
     func refreshEnergyMode() {
         DispatchQueue.global(qos: .utility).async {
             let mode = EnergyModeControl.current()
@@ -243,6 +253,8 @@ final class Monitor: ObservableObject {
             MainActor.assumeIsolated { self?.reschedule() }
         }
         if !Snapshot.isActive { AlertEngine.shared.attach(self) }
+        // After sleep, start rates and per-app deltas fresh instead of averaging over the time asleep.
+        NSWorkspaceNotifications.observeWake { [weak self] in self?.resetBaselines() }
         // Stop the nettop/top helpers when the app quits so they don't outlive it.
         NotificationCenter.default.addObserver(forName: Notification.Name("NSApplicationWillTerminateNotification"),
                                                object: nil, queue: .main) { [weak self] _ in
@@ -256,10 +268,13 @@ final class Monitor: ObservableObject {
         guard wanted != interval else { return }
         interval = wanted
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: wanted, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: wanted, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sample() }
         }
-        timer?.tolerance = wanted * 0.1
+        t.tolerance = wanted * 0.1
+        // .common keeps sampling while menus or pickers are open (the default mode pauses during tracking).
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     private func push(_ v: Double, to arr: inout [Double]) {
@@ -378,15 +393,31 @@ final class Monitor: ObservableObject {
         guard wantPS || wantGPU || wantDisk || wantTotals, !processesInFlight else { return }
         processesInFlight = true
         let prevGPU = lastGPUTimes, prevDisk = lastDiskTotals
+        let prevCPU = lastCPUTimes, prevCPUAt = lastCPUTimesAt
         let elapsed = max(0.5, Date().timeIntervalSince(lastPerProcessTime))
         lastPerProcessTime = Date()
         DispatchQueue.global(qos: .utility).async {
             let totals = wantTotals ? NetReader.totals(of: interface) : nil
             var byCPU: [UsageRow] = [], byMem: [UsageRow] = []
+            var cpuTimes: [Int32: Double] = [:], cpuAt = Date()
             if wantPS {
+                // CPU % = CPU time used between two samples ÷ wall time, like Activity Monitor.
+                var before = prevCPU, beforeAt = prevCPUAt
+                if before.isEmpty || Date().timeIntervalSince(beforeAt) > 15 {
+                    before = Dictionary(ProcessReader.snapshot().map { ($0.pid, $0.cpuTime) }, uniquingKeysWith: { a, _ in a })
+                    beforeAt = Date()
+                    Thread.sleep(forTimeInterval: 1)
+                }
                 let list = ProcessReader.snapshot()
-                byCPU = list.sorted { $0.cpu > $1.cpu }.prefix(5)
-                    .map { UsageRow(pid: $0.pid, name: $0.name, value: $0.cpu, text: pct($0.cpu)) }
+                cpuAt = Date()
+                let wall = max(0.2, cpuAt.timeIntervalSince(beforeAt))
+                cpuTimes = Dictionary(list.map { ($0.pid, $0.cpuTime) }, uniquingKeysWith: { a, _ in a })
+                byCPU = list.compactMap { e -> UsageRow? in
+                    guard let old = before[e.pid] else { return nil }
+                    let share = max(0, e.cpuTime - old) / wall
+                    return share > 0 ? UsageRow(pid: e.pid, name: e.name, value: share, text: pctSmall(share)) : nil
+                }
+                .sorted { $0.value > $1.value }.prefix(5).map { $0 }
                 byMem = list.sorted { $0.memory > $1.memory }.prefix(5)
                     .map { UsageRow(pid: $0.pid, name: $0.name, value: Double($0.memory), text: fmtBytes($0.memory)) }
             }
@@ -398,7 +429,7 @@ final class Monitor: ObservableObject {
                         guard let old = prevGPU[pid], cur.ns > old.ns else { return nil }
                         let share = min(1, Double(cur.ns - old.ns) / (elapsed * 1e9))
                         return share >= 0.001 ? UsageRow(pid: pid, name: processName(pid) ?? cur.name,
-                                                         value: share, text: pct(share)) : nil
+                                                         value: share, text: pctSmall(share)) : nil
                     }
                     .sorted { $0.value > $1.value }.prefix(5).map { $0 }
                 }
@@ -418,7 +449,10 @@ final class Monitor: ObservableObject {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if wantPS { self.topCPU = byCPU; self.topMemory = byMem }
+                    if wantPS {
+                        self.topCPU = byCPU; self.topMemory = byMem
+                        self.lastCPUTimes = cpuTimes; self.lastCPUTimesAt = cpuAt
+                    }
                     if wantGPU && self.detailVisible(.gpu) {
                         self.lastGPUTimes = gpuTimes
                         if !prevGPU.isEmpty { self.topGPU = gpuRows }
@@ -467,3 +501,13 @@ func fmtDisk(_ b: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(b), countStyle: .file)
 }
 func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+
+import AppKit
+
+enum NSWorkspaceNotifications {
+    static func observeWake(_ handler: @escaping @MainActor () -> Void) {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { handler() }
+        }
+    }
+}

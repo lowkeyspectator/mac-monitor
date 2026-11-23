@@ -20,11 +20,12 @@ enum MenuStyle: String, CaseIterable, Identifiable {
 struct LabelItem: Identifiable {
     var metric: Metric, value: Double, history: [Double]
     var up: Double = 0, down: Double = 0          // network only, bytes/s
+    var symbol: String = ""
     var id: String { metric.rawValue }
 
     @MainActor static func make(_ metric: Metric, _ m: Monitor) -> LabelItem {
         LabelItem(metric: metric, value: m.value(metric), history: m.history(metric),
-                  up: m.network.upRate, down: m.network.downRate)
+                  up: m.network.upRate, down: m.network.downRate, symbol: m.symbol(metric))
     }
 }
 
@@ -70,82 +71,129 @@ struct StatusLabel: View {
     }
 }
 
-/// Renders the label as a template image so it follows the menu bar's light/dark appearance.
+/// Draws the menu bar label as a template image (so it follows the menu bar's light/dark appearance)
+/// with plain AppKit drawing on the CPU. SwiftUI's ImageRenderer kept ~200 MB of GPU memory alive.
 @MainActor
 func renderStatusImage(items: [LabelItem], style: MenuStyle) -> NSImage? {
-    let renderer = ImageRenderer(content: StatusLabelContent(items: items, style: style))
-    renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
-    guard let img = renderer.nsImage else { return nil }
-    img.isTemplate = true
-    return img
+    StatusLabelDrawer(items: items, style: style).image()
 }
 
-struct StatusLabelContent: View {
+@MainActor
+private struct StatusLabelDrawer {
     var items: [LabelItem], style: MenuStyle
 
-    var body: some View {
-        HStack(spacing: 7) {
-            ForEach(items) { cell($0) }
-        }
-        .foregroundStyle(.black)
-        .frame(height: 22)
-        .fixedSize()
+    private let height: CGFloat = 22
+    private let gap: CGFloat = 7
+    private let big = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    private let value = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+    private let tiny = NSFont.systemFont(ofSize: 7.5, weight: .bold)
+    private let rate = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+
+    private func size(_ s: String, _ f: NSFont) -> CGSize { (s as NSString).size(withAttributes: [.font: f]) }
+    private func draw(_ s: String, _ f: NSFont, rightAlignedIn r: CGRect) {
+        let w = size(s, f).width
+        (s as NSString).draw(at: CGPoint(x: r.maxX - w, y: r.minY), withAttributes: [.font: f, .foregroundColor: NSColor.black])
+    }
+    private func draw(_ s: String, _ f: NSFont, at p: CGPoint) {
+        (s as NSString).draw(at: p, withAttributes: [.font: f, .foregroundColor: NSColor.black])
+    }
+    private func symbol(_ name: String, _ pt: CGFloat) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: pt, weight: .medium))
     }
 
-    @ViewBuilder private func cell(_ item: LabelItem) -> some View {
-        // Every number sits in a fixed-width slot, so the menu bar doesn't shift as digits change.
-        let value = FixedSlot(text: pct(item.value), widest: "100%")
+    // Widths of each part; every number reserves the width of its widest value ("100%", "888K ↑").
+    private var pctSlot: CGFloat { size("100%", style == .percent || style == .icon ? big : value).width }
+    private var stackWidth: CGFloat { max(size("RAM", tiny).width, size("100%", value).width) }
+    private var rateSlot: CGFloat { max(size("888K ↑", rate).width, size("888K ↓", rate).width) }
+
+    private func width(_ item: LabelItem) -> CGFloat {
         if item.metric == .network {
-            // Upload over download, like Stats and iStat Menus; same in every style.
-            HStack(spacing: 2) {
-                if style == .icon { Image(systemName: "network").font(.system(size: 10, weight: .medium)) }
-                VStack(alignment: .trailing, spacing: -2) {
-                    FixedSlot(text: "\(fmtRateShort(item.up)) ↑", widest: "888K ↑")
-                    FixedSlot(text: "\(fmtRateShort(item.down)) ↓", widest: "888K ↓")
-                }
-                .font(.system(size: 9, weight: .semibold))
+            return (style == .icon ? (symbol("network", 10)?.size.width ?? 0) + 2 : 0) + rateSlot
+        }
+        switch style {
+        case .percent: return pctSlot
+        case .icon: return (symbol(item.symbol, 11)?.size.width ?? 0) + 3 + pctSlot
+        case .stacked: return stackWidth
+        case .bars: return 5 + 3 + stackWidth
+        case .graph: return stackWidth + (item.metric == .storage || item.metric == .battery ? 0 : 3 + 30)
+        }
+    }
+
+    func image() -> NSImage? {
+        guard !items.isEmpty else { return nil }
+        let widths = items.map(width)
+        let total = ceil(widths.reduce(0, +) + gap * CGFloat(items.count - 1))
+        let img = NSImage(size: NSSize(width: total, height: height), flipped: true) { _ in
+            var x: CGFloat = 0
+            for (item, w) in zip(items, widths) {
+                drawItem(item, in: CGRect(x: x, y: 0, width: w, height: height))
+                x += w + gap
             }
-        } else {
-            switch style {
-            case .percent:
-                value.font(.system(size: 12, weight: .medium))
-            case .icon:
-                HStack(spacing: 3) {
-                    Image(systemName: item.metric.symbol).font(.system(size: 11, weight: .medium))
-                    value.font(.system(size: 12, weight: .medium))
-                }
-            case .stacked:
-                stacked(item, value)
-            case .bars:
-                HStack(spacing: 3) {
-                    ZStack(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: 1.5).fill(.black.opacity(0.3))
-                        RoundedRectangle(cornerRadius: 1.5).fill(.black)
-                            .frame(height: max(1.5, 16 * min(max(item.value, 0), 1)))
-                    }
-                    .frame(width: 5, height: 16)
-                    stacked(item, value)
-                }
-            case .graph:
-                HStack(spacing: 3) {
-                    stacked(item, value)
-                    if item.metric != .storage {
-                        Sparkline(values: item.history, color: .black, lineWidth: 1, capacity: 30)
-                            .frame(width: 30, height: 15)
-                            .overlay(RoundedRectangle(cornerRadius: 2).stroke(.black.opacity(0.35), lineWidth: 0.5))
-                    }
-                }
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
+    private func drawItem(_ item: LabelItem, in r: CGRect) {
+        let percent = pct(item.value)
+        if item.metric == .network {
+            var x = r.minX
+            if style == .icon, let s = symbol("network", 10) {
+                s.draw(in: CGRect(x: x, y: (height - s.size.height) / 2, width: s.size.width, height: s.size.height))
+                x += s.size.width + 2
+            }
+            let slot = CGRect(x: x, y: 0, width: rateSlot, height: height)
+            draw("\(fmtRateShort(item.up)) ↑", rate, rightAlignedIn: slot.offsetBy(dx: 0, dy: 0.5))
+            draw("\(fmtRateShort(item.down)) ↓", rate, rightAlignedIn: slot.offsetBy(dx: 0, dy: 10))
+            return
+        }
+        switch style {
+        case .percent:
+            draw(percent, big, rightAlignedIn: r.offsetBy(dx: 0, dy: 3.5))
+        case .icon:
+            if let s = symbol(item.symbol, 11) {
+                s.draw(in: CGRect(x: r.minX, y: (height - s.size.height) / 2, width: s.size.width, height: s.size.height))
+            }
+            draw(percent, big, rightAlignedIn: CGRect(x: r.maxX - pctSlot, y: 3.5, width: pctSlot, height: height))
+        case .stacked:
+            stacked(item, percent, CGRect(x: r.minX, y: 0, width: stackWidth, height: height))
+        case .bars:
+            let bar = CGRect(x: r.minX, y: 3, width: 5, height: 16)
+            NSColor.black.withAlphaComponent(0.3).setFill()
+            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+            let h = max(1.5, 16 * min(max(item.value, 0), 1))
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: CGRect(x: bar.minX, y: bar.maxY - h, width: 5, height: h), xRadius: 1.5, yRadius: 1.5).fill()
+            stacked(item, percent, CGRect(x: r.minX + 8, y: 0, width: stackWidth, height: height))
+        case .graph:
+            stacked(item, percent, CGRect(x: r.minX, y: 0, width: stackWidth, height: height))
+            if item.metric != .storage && item.metric != .battery {
+                sparkline(item.history.suffix(30), CGRect(x: r.minX + stackWidth + 3, y: 3.5, width: 30, height: 15))
             }
         }
     }
 
-    private func stacked(_ item: LabelItem, _ value: FixedSlot) -> some View {
-        VStack(alignment: .trailing, spacing: -1) {
-            Text(item.metric.shortName).font(.system(size: 7.5, weight: .bold))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            value.font(.system(size: 11, weight: .semibold))
+    private func stacked(_ item: LabelItem, _ percent: String, _ r: CGRect) {
+        draw(item.metric.shortName, tiny, at: CGPoint(x: r.minX, y: 1))
+        draw(percent, value, rightAlignedIn: CGRect(x: r.minX, y: 8, width: r.width, height: 13))
+    }
+
+    private func sparkline(_ values: ArraySlice<Double>, _ r: CGRect) {
+        NSColor.black.withAlphaComponent(0.35).setStroke()
+        let frame = NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2); frame.lineWidth = 0.5; frame.stroke()
+        guard values.count > 1 else { return }
+        let step = r.width / 29
+        let x0 = r.maxX - CGFloat(values.count - 1) * step
+        let pts = values.enumerated().map { i, v in
+            CGPoint(x: x0 + CGFloat(i) * step, y: r.maxY - r.height * CGFloat(min(max(v, 0), 1)))
         }
-        .fixedSize()
+        let fill = NSBezierPath(); fill.move(to: CGPoint(x: pts[0].x, y: r.maxY))
+        pts.forEach { fill.line(to: $0) }; fill.line(to: CGPoint(x: pts.last!.x, y: r.maxY)); fill.close()
+        NSColor.black.withAlphaComponent(0.25).setFill(); fill.fill()
+        let line = NSBezierPath(); line.move(to: pts[0]); pts.dropFirst().forEach { line.line(to: $0) }
+        line.lineWidth = 1; NSColor.black.setStroke(); line.stroke()
     }
 }
 

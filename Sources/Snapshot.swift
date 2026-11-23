@@ -6,10 +6,12 @@ import AppKit
 enum Snapshot {
     @MainActor static var monitor: Monitor?
     /// True when launched with --snapshot; the app then shows no menu bar item or widget.
-    static let isActive = CommandLine.arguments.contains("--snapshot")
+    /// True for the headless developer modes (--snapshot, --dump): no menu bar item, widget or alerts.
+    static let isActive = CommandLine.arguments.contains("--snapshot") || CommandLine.arguments.contains("--dump")
 
     static func runIfRequested() {
         let args = CommandLine.arguments
+        if args.contains("--dump") { runDump(); return }
         guard isActive, let i = args.firstIndex(of: "--snapshot") else { return }
         let dir = URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : ".")
         DispatchQueue.main.async {
@@ -20,6 +22,42 @@ enum Snapshot {
                 // Let a few samples accumulate so graphs have data.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
                     MainActor.assumeIsolated { render(m, to: dir); m.stopStreams(); exit(0) }
+                }
+            }
+        }
+    }
+
+    /// `--dump`: prints the values the app would show after ~8 s of sampling, for checking against
+    /// macOS's own tools (top, vm_stat, pmset, df, netstat).
+    static func runDump() {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let m = Monitor()
+                monitor = m
+                for k in Metric.allCases { m.setDetailVisible(k, true) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    MainActor.assumeIsolated {
+                        let mem = m.memory
+                        var out: [String] = [
+                            "cpu.total \(pct(m.cpuTotal)) user \(pct(m.cpuUser)) sys \(pct(m.cpuSystem))",
+                            "gpu.util \(pct(m.gpuUtil))",
+                            "mem.used \(mem.used) app \(mem.app) wired \(mem.wired) compressed \(mem.compressed) cached \(mem.cached) free \(mem.free) total \(mem.total)",
+                            "mem.pressure \(mem.pressure) swap \(mem.swapUsed)",
+                            "disk.root " + (m.rootVolume.map { "avail \($0.available) total \($0.total)" } ?? "-"),
+                            "disk.rate read \(Int(m.diskReadRate)) write \(Int(m.diskWriteRate))",
+                            "net.iface \(m.network.interface) ip \(m.network.localIP) down \(Int(m.network.downRate)) up \(Int(m.network.upRate)) totalDown \(m.network.totalDown) totalUp \(m.network.totalUp)",
+                            "battery.present \(m.battery.present) level \(pct(m.battery.level)) charging \(m.battery.charging) ac \(m.battery.onAC) cycles \(m.battery.cycleCount ?? -1)",
+                            "system.load \(m.system.load.0) uptime \(Int(m.system.uptime)) thermal \(m.system.thermalName)",
+                            "energy.mode \(m.energyMode?.title ?? "-")",
+                        ]
+                        for (name, rows) in [("cpu", m.topCPU), ("mem", m.topMemory), ("gpu", m.topGPU),
+                                             ("disk", m.topDisk), ("net", m.topNetwork), ("energy", m.topEnergy)] {
+                            out.append("top.\(name) " + rows.map { "\($0.name)[\($0.pid)]=\($0.text)" }.joined(separator: "; "))
+                        }
+                        print(out.joined(separator: "\n"))
+                        m.stopStreams()
+                        exit(0)
+                    }
                 }
             }
         }
@@ -51,7 +89,7 @@ enum Snapshot {
             ForEach(MenuStyle.allCases) { style in
                 HStack {
                     Text(style.title).font(.caption).frame(width: 130, alignment: .leading)
-                    StatusLabelContent(items: items, style: style)
+                    if let img = renderStatusImage(items: items, style: style) { Image(nsImage: img) }
                 }
             }
         }.padding(12), m, .light, .white, dir.appendingPathComponent("menubar-styles.png"))

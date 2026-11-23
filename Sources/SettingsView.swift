@@ -63,7 +63,6 @@ struct GeneralSettings: View {
 }
 
 struct MenuBarSettings: View {
-    @EnvironmentObject var m: Monitor
     @AppStorage("mb.cpu") private var cpu = true
     @AppStorage("mb.gpu") private var gpu = true
     @AppStorage("mb.memory") private var memory = true
@@ -91,7 +90,7 @@ struct MenuBarSettings: View {
                 Toggle("Memory usage", isOn: $memory)
                 Toggle("Storage used", isOn: $storage)
                 Toggle("Network upload and download speed", isOn: $network)
-                if m.battery.present { Toggle("Battery level", isOn: $batteryOn) }
+                if BatteryInfo.hasBattery { Toggle("Battery level", isOn: $batteryOn) }
             } header: {
                 HStack {
                     Text("Show in the menu bar")
@@ -105,7 +104,11 @@ struct MenuBarSettings: View {
                 Picker("Style", selection: $style) {
                     ForEach(MenuStyle.allCases) { Text($0.title).tag($0.rawValue) }
                 }
-                LabeledContent("Preview") { preview }
+                LabeledContent("Preview") {
+                    MenuBarPreview(on: [.cpu: cpu, .gpu: gpu, .memory: memory, .storage: storage,
+                                        .network: network, .battery: batteryOn],
+                                   style: MenuStyle(rawValue: style) ?? .icon)
+                }
             }
             .disabled(!visible)
         }
@@ -113,15 +116,19 @@ struct MenuBarSettings: View {
         .frame(height: 560)
     }
 
-    @ViewBuilder private var preview: some View {
-        let on: [Metric: Bool] = [.cpu: cpu, .gpu: gpu, .memory: memory, .storage: storage,
-                                  .network: network, .battery: batteryOn]
+}
+
+/// Only this small view observes live data, so the rest of the form doesn't redraw every tick.
+struct MenuBarPreview: View {
+    @EnvironmentObject var m: Monitor
+    var on: [Metric: Bool], style: MenuStyle
+    var body: some View {
         let items = Metric.menuBarMetrics.filter { on[$0] == true && ($0 != .battery || m.battery.present) }
             .map { LabelItem.make($0, m) }
         Group {
             if items.isEmpty {
                 Image(systemName: "gauge.with.dots.needle.50percent")
-            } else if let img = renderStatusImage(items: items, style: MenuStyle(rawValue: style) ?? .icon) {
+            } else if let img = renderStatusImage(items: items, style: style) {
                 Image(nsImage: img).renderingMode(.template)
             }
         }
@@ -159,7 +166,6 @@ struct WidgetSettings: View {
 }
 
 struct AlertSettings: View {
-    @EnvironmentObject var m: Monitor
     @AppStorage("alerts.cpu") private var cpu = false
     @AppStorage("alerts.cpuLimit") private var cpuLimit = 0.9
     @AppStorage("alerts.cpuSeconds") private var cpuSeconds = 60.0
@@ -199,7 +205,7 @@ struct AlertSettings: View {
                         ForEach([10.0, 20.0, 50.0, 100.0], id: \.self) { Text("\(Int($0)) GB").tag($0) }
                     }
                 }
-                if m.battery.present {
+                if BatteryInfo.hasBattery {
                     Toggle("Low battery", isOn: $battery)
                     if battery {
                         Picker("When at or below", selection: $batteryLimit) {

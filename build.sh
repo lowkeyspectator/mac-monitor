@@ -6,7 +6,7 @@
 #   ./build.sh --zip      also create MacMonitor.zip for distribution
 set -e
 cd "$(dirname "$0")"
-VERSION=1.4.0
+VERSION=1.5.0
 APP=MacMonitor.app
 BUILD=.build
 rm -rf "$APP" "$BUILD"

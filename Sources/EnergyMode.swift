@@ -16,7 +16,7 @@ enum EnergyModeControl {
     /// High Power Mode exists only on Max-chip MacBook Pros.
     static let supportsHighPower: Bool = {
         let chip = Sys.sysctlString("machdep.cpu.brand_string") ?? ""
-        return chip.contains("Max") && BatteryReader.read().present
+        return chip.contains("Max") && BatteryInfo.hasBattery
     }()
 
     private static func pmsetSettings() -> [String: Int] {
@@ -26,7 +26,7 @@ enum EnergyModeControl {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return [:] }
+        guard (try? p.runHelper()) != nil else { return [:] }
         let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         p.waitUntilExit()
         var out: [String: Int] = [:]

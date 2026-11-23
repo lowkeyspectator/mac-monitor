@@ -63,7 +63,7 @@ enum NetReader {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
+        do { try p.runHelper() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         // Columns: Name Mtu Network [Address] Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
@@ -118,32 +118,83 @@ enum DiskIOReader {
 // MARK: - Processes
 
 struct ProcessEntry: Identifiable {
-    var pid: Int32, name: String, cpu: Double, memory: UInt64
+    var pid: Int32, name: String
+    var cpuTime: Double        // total CPU seconds used so far (user + system)
+    var memory: UInt64         // physical footprint where readable, else resident size
     var id: Int32 { pid }
+}
+
+/// True for the short-lived helper processes Mac Monitor itself launches (ps, top, nettop, netstat, pmset),
+/// so they never show up in its own "top apps" lists.
+func isOwnHelper(_ pid: Int32) -> Bool {
+    if Helpers.contains(pid) { return true }      // also covers privileged tools like nettop
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return false }
+    return Int32(info.pbi_ppid) == getpid()
+}
+
+/// PIDs of helper processes Mac Monitor has launched recently.
+enum Helpers {
+    nonisolated(unsafe) private static var pids: [Int32] = []
+    private static let lock = NSLock()
+    static func add(_ p: Process) {
+        lock.lock(); defer { lock.unlock() }
+        pids.append(p.processIdentifier)
+        if pids.count > 64 { pids.removeFirst(pids.count - 64) }
+    }
+    static func contains(_ pid: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; return pids.contains(pid) }
+}
+
+extension Process {
+    /// Runs the process and remembers it as one of Mac Monitor's own helpers.
+    func runHelper() throws { try run(); Helpers.add(self) }
 }
 
 enum ProcessReader {
     /// Uses `ps`, which (unlike proc_pidinfo) can see every user's processes without root.
+    /// CPU is returned as cumulative CPU time; callers turn two snapshots into a percentage,
+    /// the way Activity Monitor does, rather than using ps's slowly decaying %CPU.
     static func snapshot() -> [ProcessEntry] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-Aceo", "pid=,pcpu=,rss=,comm="]
+        p.arguments = ["-Aceo", "pid=,ppid=,time=,rss=,comm="]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
+        do { try p.runHelper() } catch { return [] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         let own = getpid()
         return text.split(separator: "\n").compactMap { line in
-            let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
-            guard parts.count == 4, let pid = Int32(parts[0]), pid != own,
-                  let cpu = Double(parts[1]), let rssKB = UInt64(parts[2]) else { return nil }
-            return ProcessEntry(pid: pid, name: String(parts[3]), cpu: cpu / 100, memory: rssKB * 1024)
+            let f = line.split(separator: " ", maxSplits: 4, omittingEmptySubsequences: true)
+            guard f.count == 5, let pid = Int32(f[0]), let ppid = Int32(f[1]), ppid != own,
+                  let time = parseCPUTime(f[2]), let rssKB = UInt64(f[3]) else { return nil }
+            return ProcessEntry(pid: pid, name: String(f[4]), cpuTime: time,
+                                memory: footprint(pid) ?? rssKB * 1024)
         }
     }
+
+    /// ps "time": "M:SS.cc", "MM:SS.cc" or "H:MM:SS.cc" → seconds.
+    static func parseCPUTime(_ s: Substring) -> Double? {
+        let parts = s.split(separator: ":").compactMap { Double($0) }
+        guard !parts.isEmpty else { return nil }
+        return parts.reduce(0) { $0 * 60 + $1 }
+    }
+
+    /// Activity Monitor's "Memory" column. Readable for the current user's processes only.
+    static func footprint(_ pid: Int32) -> UInt64? {
+        var info = rusage_info_v4()
+        let r = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        return r == 0 && info.ri_phys_footprint > 0 ? info.ri_phys_footprint : nil
+    }
 }
+
+/// Percent text that never shows a misleading "0%" for small non-zero values.
+func pctSmall(_ v: Double) -> String { v > 0 && v < 0.005 ? "<1%" : pct(v) }
 
 // MARK: - Battery
 
@@ -160,6 +211,9 @@ struct BatteryInfo {
     var condition: String?
     var temperature: Double?            // °C
     var adapterWatts: Int?
+
+    /// Whether this Mac has a built-in battery (doesn't change while running).
+    static let hasBattery = BatteryReader.read().present
 }
 
 enum BatteryReader {

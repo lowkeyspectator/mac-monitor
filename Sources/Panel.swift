@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Metrics
 
@@ -71,6 +72,19 @@ extension Monitor {
         }
     }
 
+    /// The symbol for a metric, reflecting live state where macOS's own icons do (battery level, charging).
+    func symbol(_ k: Metric) -> String {
+        guard k == .battery else { return k.symbol }
+        if battery.charging { return "battery.100percent.bolt" }
+        switch battery.level {
+        case ..<0.13: return "battery.0percent"
+        case ..<0.38: return "battery.25percent"
+        case ..<0.63: return "battery.50percent"
+        case ..<0.88: return "battery.75percent"
+        default: return "battery.100percent"
+        }
+    }
+
     var pressureName: String {
         switch memory.pressure { case 4...: "Critical"; case 2...: "Warning"; default: "Normal" }
     }
@@ -106,9 +120,12 @@ struct MetricCard: View {
     let metric: Metric
     @AppStorage private var expanded: Bool
 
+    @StateObject private var hover: Box<Bool>
+
     init(metric: Metric, prefix: String) {
         self.metric = metric
         _expanded = AppStorage(wrappedValue: false, "\(prefix).\(metric.rawValue)")
+        _hover = StateObject(wrappedValue: Box(false))
     }
 
     var body: some View {
@@ -128,7 +145,8 @@ struct MetricCard: View {
             }
         }
         .padding(10)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(.quaternary.opacity(hover.value ? 0.8 : 0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { hover.value = $0 }
     }
 
     // MARK: header
@@ -136,7 +154,7 @@ struct MetricCard: View {
     private var header: some View {
         VStack(spacing: 7) {
             HStack(spacing: 10) {
-                IconTile(symbol: metric.symbol, tint: metric.tint)
+                IconTile(symbol: m.symbol(metric), tint: metric.tint)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(metric.title).font(.system(size: 13, weight: .semibold))
                     Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -418,7 +436,7 @@ enum AppIconCache {
                 if let r = path.range(of: ".app/") {
                     img = NSWorkspace.shared.icon(forFile: String(path[..<r.lowerBound]) + ".app")
                 } else {
-                    img = NSWorkspace.shared.icon(forFile: path)
+                    img = NSWorkspace.shared.icon(for: .unixExecutable)   // standard icon for command-line tools
                 }
             }
         }
