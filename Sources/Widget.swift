@@ -52,7 +52,7 @@ struct WidgetView: View {
         .overlay(alignment: .topTrailing) {
             controls.padding(10).opacity(hovering.value ? 1 : 0)
         }
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering.value = h } }
+        .onHover { h in withAnimation(motion(.easeOut(duration: 0.15))) { hovering.value = h } }
         // Dragging anywhere on the widget moves it — handled by WindowConfigurator.
         .background(WindowConfigurator(level: WidgetLevel(rawValue: level) ?? .desktop))
         // showWidget is cleared by WindowConfigurator when the window actually closes,
@@ -68,7 +68,7 @@ struct WidgetView: View {
                     .onTapGesture {
                         guard !WidgetDrag.justDragged else { return }
                         UserDefaults.standard.set(true, forKey: "widget.\(metric.rawValue)")
-                        withAnimation(.snappy(duration: 0.3)) { expanded = true }
+                        withAnimation(motion(.snappy(duration: 0.3))) { expanded = true }
                     }
                     .help("Show \(metric.title) details")
             }
@@ -91,7 +91,7 @@ struct WidgetView: View {
         HStack(spacing: 6) {
             CircleButton(symbol: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                          help: expanded ? "Collapse" : "Expand") {
-                withAnimation(.snappy(duration: 0.3)) { expanded.toggle() }
+                withAnimation(motion(.snappy(duration: 0.3))) { expanded.toggle() }
             }
             CircleButton(symbol: "gearshape", help: "Settings…") {
                 NSApp.activate()

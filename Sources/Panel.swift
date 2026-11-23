@@ -97,6 +97,11 @@ extension Monitor {
     }
 }
 
+/// The animation to use, or none when the user has turned on Reduce Motion (as Apple's apps do).
+func motion(_ animation: Animation) -> Animation? {
+    NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : animation
+}
+
 func pressureColor(_ p: Int) -> Color { p >= 4 ? .red : p >= 2 ? .yellow : .green }
 
 // MARK: - Panel with expandable cards (used by the menu bar panel and the widget)
@@ -131,7 +136,7 @@ struct MetricCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.snappy(duration: 0.25)) { expanded.toggle() }
+                withAnimation(motion(.snappy(duration: 0.25))) { expanded.toggle() }
             } label: { header }
             .buttonStyle(.plain)
             .accessibilityLabel("\(metric.title), \(valueText). \(expanded ? "Collapse" : "Expand") details")
@@ -139,9 +144,14 @@ struct MetricCard: View {
             if expanded {
                 detail
                     .transition(.opacity.combined(with: .move(edge: .top)))
-                    // Per-app collection runs only while these details are on screen.
-                    .onAppear { m.setDetailVisible(metric, true) }
-                    .onDisappear { m.setDetailVisible(metric, false) }
+                    // Per-app collection runs only while these details are actually on screen:
+                    // expanded, and in a window that is open and not hidden or covered.
+                    .background {
+                        // (Snapshot mode turns collection on itself, and can't render AppKit views.)
+                        if !Snapshot.isActive {
+                            VisibilityReporter { [weak m] visible in m?.setDetailVisible(metric, visible) }
+                        }
+                    }
             }
         }
         .padding(10)
@@ -378,6 +388,56 @@ struct MetricCard: View {
     }
 }
 
+/// Reports whether this view is really visible: in a window that is on screen and not fully covered.
+/// SwiftUI's onAppear/onDisappear don't fire when a menu bar panel is merely hidden.
+struct VisibilityReporter: NSViewRepresentable {
+    var onChange: @MainActor (Bool) -> Void
+
+    final class ReporterView: NSView {
+        var onChange: (@MainActor (Bool) -> Void)?
+        private var last: Bool?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard let w = window else { report(false); return }
+            let nc = NotificationCenter.default
+            for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification] {
+                observers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak self] n in
+                    MainActor.assumeIsolated {
+                        self?.report(n.name == NSWindow.willCloseNotification ? false : self?.isOnScreen ?? false)
+                    }
+                })
+            }
+            report(isOnScreen)
+        }
+
+        private var isOnScreen: Bool {
+            guard let w = window else { return false }
+            return w.isVisible && w.occlusionState.contains(.visible)
+        }
+
+        func report(_ visible: Bool) {
+            guard visible != last else { return }
+            if last == nil && !visible { last = false; return }   // never report "hidden" before "shown"
+            last = visible
+            onChange?(visible)
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    func makeNSView(context: Context) -> ReporterView {
+        let v = ReporterView()
+        v.onChange = onChange
+        return v
+    }
+    func updateNSView(_ v: ReporterView, context: Context) { v.onChange = onChange }
+    static func dismantleNSView(_ v: ReporterView, coordinator: ()) { v.report(false) }
+}
+
 /// Top-N app list with a right-aligned value, like Activity Monitor's columns.
 struct ProcessList: View {
     var title: String, rows: [UsageRow]
@@ -403,8 +463,52 @@ struct ProcessList: View {
                 }
                 .font(.system(size: 12))
                 .help("\(r.name) (PID \(r.pid))")
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(r.name), \(r.text)")
+                .contextMenu { ProcessActions(pid: r.pid, name: r.name) }
             }
         }
+    }
+}
+
+/// Right-click actions on a process row, like Activity Monitor's. Quitting is offered only for apps
+/// in the Dock (never background system agents); Force Quit asks first.
+struct ProcessActions: View {
+    var pid: Int32, name: String
+    var body: some View {
+        let app = NSRunningApplication(processIdentifier: pid)
+        if let app, app.activationPolicy == .regular, pid != getpid() {
+            Button("Quit \(name)") { app.terminate() }
+            Button("Force Quit \(name)…") { confirmForceQuit(app, name: name) }
+            Divider()
+        }
+        if let url = executableURL {
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        }
+        Button("Copy Process ID (\(pid))") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(String(pid), forType: .string)
+        }
+    }
+
+    private var executableURL: URL? {
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
+        let path = String(cString: buf)
+        let app = path.range(of: ".app/").map { String(path[..<$0.lowerBound]) + ".app" }
+        return URL(fileURLWithPath: app ?? path)
+    }
+
+    private func confirmForceQuit(_ app: NSRunningApplication, name: String) {
+        let alert = NSAlert()
+        alert.messageText = "Force quit \(name)?"
+        alert.informativeText = "You will lose any unsaved changes in \(name)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Force Quit")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        if alert.runModal() == .alertFirstButtonReturn { app.forceTerminate() }
     }
 }
 
@@ -420,28 +524,21 @@ struct AppIcon: View {
 
 @MainActor
 enum AppIconCache {
-    private static var cache: [Int32: NSImage] = [:]
-    private static let generic: NSImage = {
-        NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) ?? NSImage()
-    }()
+    /// Keyed by executable path (process IDs get reused), with a small PID → path memo.
+    private static var byPath: [String: NSImage] = [:]
+    private static let executable = NSWorkspace.shared.icon(for: .unixExecutable)
+
     static func icon(for pid: Int32) -> NSImage {
-        if let i = cache[pid] { return i }
-        var img = generic
-        if let app = NSRunningApplication(processIdentifier: pid), let icon = app.icon {
-            img = icon
-        } else {
-            var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-            if proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 {
-                let path = String(cString: buf)
-                if let r = path.range(of: ".app/") {
-                    img = NSWorkspace.shared.icon(forFile: String(path[..<r.lowerBound]) + ".app")
-                } else {
-                    img = NSWorkspace.shared.icon(for: .unixExecutable)   // standard icon for command-line tools
-                }
-            }
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else {
+            return NSRunningApplication(processIdentifier: pid)?.icon ?? executable
         }
-        if cache.count > 300 { cache.removeAll() }
-        cache[pid] = img
+        let path = String(cString: buf)
+        let key = path.range(of: ".app/").map { String(path[..<$0.lowerBound]) + ".app" } ?? path
+        if let i = byPath[key] { return i }
+        let img = key.hasSuffix(".app") ? NSWorkspace.shared.icon(forFile: key) : executable
+        if byPath.count > 300 { byPath.removeAll() }
+        byPath[key] = img
         return img
     }
 }
@@ -534,6 +631,9 @@ struct CoreCell: View {
             .font(.system(size: 9))
         }
         .help("Core \(index + 1): \(pct(value))")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Core \(index + 1)")
+        .accessibilityValue(pct(value))
     }
 }
 
@@ -580,6 +680,9 @@ struct Ring: View {
             Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
         }
         .frame(width: size + 14)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(detail.isEmpty ? pct(value) : "\(pct(value)), \(detail)")
     }
 }
 

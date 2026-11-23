@@ -19,12 +19,20 @@ struct NetworkInfo {
 }
 
 enum NetReader {
+    nonisolated(unsafe) private static let store = SCDynamicStoreCreate(nil, "MacMonitor" as CFString, nil, nil)
+    nonisolated(unsafe) private static var cachedInterface: (name: String?, at: Date) = (nil, .distantPast)
+
     /// The interface macOS currently routes traffic through (Wi-Fi, Ethernet, …).
+    /// Re-read every 5 s from one long-lived configd session rather than a new session per sample.
+    /// Called from the main thread only.
     static func primaryInterface() -> String? {
-        guard let store = SCDynamicStoreCreate(nil, "MacMonitor" as CFString, nil, nil),
-              let dict = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any]
-        else { return nil }
-        return dict["PrimaryInterface"] as? String
+        if Date().timeIntervalSince(cachedInterface.at) < 5 { return cachedInterface.name }
+        var name: String?
+        if let store, let dict = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any] {
+            name = dict["PrimaryInterface"] as? String
+        }
+        cachedInterface = (name, Date())
+        return name
     }
 
     /// Byte counters per interface. Unprivileged apps only get the low 32 bits,
@@ -309,7 +317,8 @@ func fmtDuration(_ seconds: TimeInterval) -> String {
     let m = Int(seconds) / 60, h = m / 60, d = h / 24
     if d > 0 { return "\(d)d \(h % 24)h" }
     if h > 0 { return "\(h)h \(m % 60)m" }
-    return "\(m)m"
+    if m > 0 { return "\(m)m" }
+    return "\(Int(seconds))s"
 }
 
 func fmtMinutes(_ m: Int) -> String { m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m" }

@@ -93,16 +93,19 @@ enum DiskProcessReader {
 // MARK: - Streaming collectors (nettop, top)
 
 /// Runs a command that prints a block of lines every few seconds and hands each complete block to `onBlock`.
+/// All buffer work happens on one serial queue, so stopping can never race with incoming output.
 final class StreamCollector: @unchecked Sendable {
-    private var process: Process?
-    private var pipe: Pipe?
-    private var buffer = ""
-    private var block: [String] = []
+    private let queue = DispatchQueue(label: "MacMonitor.StreamCollector")
+    private var process: Process?          // main thread only
+    private var pipe: Pipe?                // main thread only
+    private var generation = 0             // main thread writes; read on `queue` via capture
+    private var buffer = ""                // `queue` only
+    private var block: [String] = []       // `queue` only
     private let launchPath: String, args: [String]
-    private let isHeader: (String) -> Bool
+    private let isHeader: @Sendable (String) -> Bool
     private let onBlock: @Sendable ([String]) -> Void
 
-    init(_ launchPath: String, _ args: [String], isHeader: @escaping (String) -> Bool,
+    init(_ launchPath: String, _ args: [String], isHeader: @escaping @Sendable (String) -> Bool,
          onBlock: @escaping @Sendable ([String]) -> Void) {
         self.launchPath = launchPath; self.args = args; self.isHeader = isHeader; self.onBlock = onBlock
     }
@@ -111,6 +114,9 @@ final class StreamCollector: @unchecked Sendable {
 
     func start() {
         guard !isRunning else { return }
+        generation += 1
+        let gen = generation
+        queue.async { self.buffer = ""; self.block = [] }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: launchPath)
         p.arguments = args
@@ -120,19 +126,23 @@ final class StreamCollector: @unchecked Sendable {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
             guard let self, !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
-            self.consume(s)
+            self.queue.async { self.consume(s, gen: gen) }
         }
-        do { try p.runHelper(); process = p; self.pipe = pipe } catch { process = nil }
+        do { try p.runHelper(); process = p; self.pipe = pipe } catch { process = nil; self.pipe = nil }
     }
 
     func stop() {
-        pipe?.fileHandleForReading.readabilityHandler = nil   // no more callbacks before clearing state
+        generation += 1                                     // output still in flight is ignored
+        pipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminate()
         process = nil; pipe = nil
-        buffer = ""; block = []
+        queue.async { self.buffer = ""; self.block = [] }
     }
 
-    private func consume(_ s: String) {
+    private var currentGeneration: Int { DispatchQueue.main.sync { generation } }
+
+    private func consume(_ s: String, gen: Int) {
+        guard gen == currentGeneration else { return }
         buffer += s
         while let nl = buffer.firstIndex(of: "\n") {
             let line = String(buffer[..<nl])
@@ -151,16 +161,19 @@ final class StreamCollector: @unchecked Sendable {
 
 /// Runs a short command over and over on a background thread while started, handing each run's
 /// output lines to `onOutput`. Used for `nettop`, which buffers its output when not on a terminal
-/// and so can't be streamed.
+/// and so can't be streamed. Each run takes at least `minimumPeriod`, and failures back off,
+/// so a command that exits immediately can never spin.
 final class RepeatingCommand: @unchecked Sendable {
     private let lock = NSLock()
     private var running = false
     private var generation = 0
     private let launchPath: String, args: [String]
+    private let minimumPeriod: TimeInterval
     private let onOutput: @Sendable ([String]) -> Void
 
-    init(_ launchPath: String, _ args: [String], onOutput: @escaping @Sendable ([String]) -> Void) {
-        self.launchPath = launchPath; self.args = args; self.onOutput = onOutput
+    init(_ launchPath: String, _ args: [String], minimumPeriod: TimeInterval = 4,
+         onOutput: @escaping @Sendable ([String]) -> Void) {
+        self.launchPath = launchPath; self.args = args; self.minimumPeriod = minimumPeriod; self.onOutput = onOutput
     }
 
     func start() {
@@ -176,20 +189,32 @@ final class RepeatingCommand: @unchecked Sendable {
 
     private func isCurrent(_ gen: Int) -> Bool { lock.lock(); defer { lock.unlock() }; return running && gen == generation }
 
+    /// Marks this loop as finished so a later start() can launch a new one.
+    private func finish(_ gen: Int) { lock.lock(); if gen == generation { running = false }; lock.unlock() }
+
     private func loop(_ gen: Int) {
+        var failures = 0
         while isCurrent(gen) {
+            let began = Date()
             let p = Process()
             p.executableURL = URL(fileURLWithPath: launchPath)
             p.arguments = args
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
-            guard (try? p.runHelper()) != nil else { return }
+            guard (try? p.runHelper()) != nil else { finish(gen); return }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
-            if isCurrent(gen), let text = String(data: data, encoding: .utf8) {
+            let ok = p.terminationStatus == 0 && !data.isEmpty
+            failures = ok ? 0 : failures + 1
+            if ok, isCurrent(gen), let text = String(data: data, encoding: .utf8) {
                 onOutput(text.components(separatedBy: "\n"))
             }
+            // Never faster than minimumPeriod; back off to 30 s after repeated failures.
+            let period = failures >= 3 ? 30 : minimumPeriod
+            let rest = period - Date().timeIntervalSince(began)
+            var slept = 0.0
+            while rest - slept > 0, isCurrent(gen) { Thread.sleep(forTimeInterval: min(0.5, rest - slept)); slept += 0.5 }
         }
     }
 }

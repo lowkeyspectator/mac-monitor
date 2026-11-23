@@ -103,9 +103,19 @@ private struct StatusLabelDrawer {
     }
 
     // Widths of each part; every number reserves the width of its widest value ("100%", "888K ↑").
-    private var pctSlot: CGFloat { size("100%", style == .percent || style == .icon ? big : value).width }
-    private var stackWidth: CGFloat { max(size("RAM", tiny).width, size("100%", value).width) }
-    private var rateSlot: CGFloat { max(size("888K ↑", rate).width, size("888K ↓", rate).width) }
+    // Fonts never change, so these are measured once rather than on every redraw.
+    private static let widths: (pctBig: CGFloat, pctSmall: CGFloat, stack: CGFloat, rate: CGFloat) = {
+        func w(_ s: String, _ f: NSFont) -> CGFloat { (s as NSString).size(withAttributes: [.font: f]).width }
+        let big = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        let value = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        let tiny = NSFont.systemFont(ofSize: 7.5, weight: .bold)
+        let rate = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+        return (w("100%", big), w("100%", value),
+                max(w("RAM", tiny), w("100%", value)), max(w("888K ↑", rate), w("888K ↓", rate)))
+    }()
+    private var pctSlot: CGFloat { style == .percent || style == .icon ? Self.widths.pctBig : Self.widths.pctSmall }
+    private var stackWidth: CGFloat { Self.widths.stack }
+    private var rateSlot: CGFloat { Self.widths.rate }
 
     private func width(_ item: LabelItem) -> CGFloat {
         if item.metric == .network {
@@ -253,7 +263,7 @@ struct MenuPanel: View {
             }
             Spacer()
             Button {
-                withAnimation(.snappy(duration: 0.25)) { UsagePanel.setAll(!allOpen, prefix: "popover") }
+                withAnimation(motion(.snappy(duration: 0.25))) { UsagePanel.setAll(!allOpen, prefix: "popover") }
             } label: {
                 Image(systemName: allOpen ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
             }

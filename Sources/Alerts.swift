@@ -13,6 +13,7 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
 
     private struct State { var since: Date?; var firedAt: Date? }
     private var states: [Kind: State] = [:]
+    private var cpuSamples: [(at: Date, value: Double)] = []   // for the moving average
     private let cooldown: TimeInterval = 15 * 60
     private let d = UserDefaults.standard
 
@@ -29,9 +30,14 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
         let diskGB = d.object(forKey: "alerts.diskGB") as? Double ?? 20
         let batteryLimit = d.object(forKey: "alerts.batteryLimit") as? Double ?? 0.2
 
-        check(.cpu, m.cpuTotal >= cpuLimit, sustain: cpuFor, now: now,
+        // Average over the whole window, so normal fluctuation around the limit doesn't reset it.
+        cpuSamples.append((now, m.cpuTotal))
+        cpuSamples.removeAll { now.timeIntervalSince($0.at) > cpuFor }
+        let covered = (cpuSamples.first.map { now.timeIntervalSince($0.at) } ?? 0) >= cpuFor * 0.9
+        let average = cpuSamples.isEmpty ? 0 : cpuSamples.map(\.value).reduce(0, +) / Double(cpuSamples.count)
+        check(.cpu, covered && average >= cpuLimit, sustain: 0, now: now,
               title: "High CPU usage",
-              body: "CPU has been at \(pct(m.cpuTotal)) for over \(Int(cpuFor)) seconds." + topProcess(m))
+              body: "CPU has averaged \(pct(average)) over the last \(fmtDuration(cpuFor))." + topProcess(m))
         check(.memory, m.memory.pressure >= pressureLevel, sustain: 10, now: now,
               title: "Memory pressure is \(m.pressureName.lowercased())",
               body: "\(fmtBytes(m.memory.used)) of \(fmtBytes(m.memory.total)) in use. Quitting apps will free memory.")

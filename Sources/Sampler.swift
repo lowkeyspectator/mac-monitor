@@ -175,10 +175,11 @@ final class Monitor: ObservableObject {
     private var processesInFlight = false
     private var detailRefs: [Metric: Int] = [:]
     private var lastGPUTimes: [Int32: (name: String, ns: UInt64)] = [:]
+    private var lastGPUAt = Date()
     private var lastDiskTotals: [Int32: (read: UInt64, write: UInt64)] = [:]
+    private var lastDiskAt = Date()
     private var lastCPUTimes: [Int32: Double] = [:]
     private var lastCPUTimesAt = Date.distantPast
-    private var lastPerProcessTime = Date()
     // nettop: two samples 2 s apart, delta mode; repeated while the Network card is open.
     private lazy var netStream = RepeatingCommand(
         "/usr/bin/nettop", ["-P", "-d", "-x", "-L", "2", "-s", "2", "-J", "bytes_in,bytes_out"],
@@ -299,8 +300,10 @@ final class Monitor: ObservableObject {
             cpuUser = tAll > 0 ? Double(tu) / Double(tAll) : 0
             cpuSystem = tAll > 0 ? Double(ts) / Double(tAll) : 0
             cpuTotal = cpuUser + cpuSystem
-            if coreHistory.count != cores.count { coreHistory = Array(repeating: [], count: cores.count) }
-            for i in cores.indices { push(cores[i], to: &coreHistory[i]) }
+            // Build per-core history locally and publish it once (not once per core).
+            var history = coreHistory.count == cores.count ? coreHistory : Array(repeating: [], count: cores.count)
+            for i in cores.indices { push(cores[i], to: &history[i]) }
+            coreHistory = history
             push(cpuTotal, to: &cpuHistory)
         }
         lastTicks = now
@@ -392,10 +395,8 @@ final class Monitor: ObservableObject {
         let wantTotals = detailVisible(.network) && !interface.isEmpty
         guard wantPS || wantGPU || wantDisk || wantTotals, !processesInFlight else { return }
         processesInFlight = true
-        let prevGPU = lastGPUTimes, prevDisk = lastDiskTotals
+        let prevGPU = lastGPUTimes, prevGPUAt = lastGPUAt, prevDisk = lastDiskTotals, prevDiskAt = lastDiskAt
         let prevCPU = lastCPUTimes, prevCPUAt = lastCPUTimesAt
-        let elapsed = max(0.5, Date().timeIntervalSince(lastPerProcessTime))
-        lastPerProcessTime = Date()
         DispatchQueue.global(qos: .utility).async {
             let totals = wantTotals ? NetReader.totals(of: interface) : nil
             var byCPU: [UsageRow] = [], byMem: [UsageRow] = []
@@ -421,9 +422,11 @@ final class Monitor: ObservableObject {
                 byMem = list.sorted { $0.memory > $1.memory }.prefix(5)
                     .map { UsageRow(pid: $0.pid, name: $0.name, value: Double($0.memory), text: fmtBytes($0.memory)) }
             }
-            var gpuTimes: [Int32: (name: String, ns: UInt64)] = [:], gpuRows: [UsageRow] = []
+            var gpuTimes: [Int32: (name: String, ns: UInt64)] = [:], gpuRows: [UsageRow] = [], gpuAt = Date()
             if wantGPU {
                 gpuTimes = GPUProcessReader.times()
+                gpuAt = Date()
+                let elapsed = max(0.2, gpuAt.timeIntervalSince(prevGPUAt))
                 if !prevGPU.isEmpty {
                     gpuRows = gpuTimes.compactMap { pid, cur in
                         guard let old = prevGPU[pid], cur.ns > old.ns else { return nil }
@@ -434,9 +437,11 @@ final class Monitor: ObservableObject {
                     .sorted { $0.value > $1.value }.prefix(5).map { $0 }
                 }
             }
-            var diskTotals: [Int32: (read: UInt64, write: UInt64)] = [:], diskRows: [UsageRow] = []
+            var diskTotals: [Int32: (read: UInt64, write: UInt64)] = [:], diskRows: [UsageRow] = [], diskAt = Date()
             if wantDisk {
                 diskTotals = DiskProcessReader.totals()
+                diskAt = Date()
+                let elapsed = max(0.2, diskAt.timeIntervalSince(prevDiskAt))
                 if !prevDisk.isEmpty {
                     diskRows = diskTotals.compactMap { pid, cur in
                         guard let old = prevDisk[pid], cur.read >= old.read, cur.write >= old.write else { return nil }
@@ -454,11 +459,11 @@ final class Monitor: ObservableObject {
                         self.lastCPUTimes = cpuTimes; self.lastCPUTimesAt = cpuAt
                     }
                     if wantGPU && self.detailVisible(.gpu) {
-                        self.lastGPUTimes = gpuTimes
+                        self.lastGPUTimes = gpuTimes; self.lastGPUAt = gpuAt
                         if !prevGPU.isEmpty { self.topGPU = gpuRows }
                     }
                     if wantDisk && self.detailVisible(.storage) {
-                        self.lastDiskTotals = diskTotals
+                        self.lastDiskTotals = diskTotals; self.lastDiskAt = diskAt
                         if !prevDisk.isEmpty { self.topDisk = diskRows }
                     }
                     if let totals, self.network.interface == interface {
@@ -492,10 +497,21 @@ final class Monitor: ObservableObject {
 
 extension Double { var nonZero: Double? { self == 0 ? nil : self } }
 
+/// Formatters are reused (creating one per call showed up on every redraw); a lock keeps them
+/// safe to call from the background per-app refresh as well.
+private enum Formatters {
+    static let lock = NSLock()
+    nonisolated(unsafe) static let gbmb: ByteCountFormatter = {
+        let f = ByteCountFormatter(); f.countStyle = .memory; f.allowedUnits = [.useGB, .useMB]; return f
+    }()
+    nonisolated(unsafe) static let tb: ByteCountFormatter = {
+        let f = ByteCountFormatter(); f.countStyle = .memory; f.allowedUnits = [.useTB]; return f
+    }()
+}
+
 func fmtBytes(_ b: UInt64) -> String {
-    let f = ByteCountFormatter(); f.countStyle = .memory
-    f.allowedUnits = b >= 1 << 40 ? [.useTB] : [.useGB, .useMB]
-    return f.string(fromByteCount: Int64(b))
+    Formatters.lock.lock(); defer { Formatters.lock.unlock() }
+    return (b >= 1 << 40 ? Formatters.tb : Formatters.gbmb).string(fromByteCount: Int64(b))
 }
 func fmtDisk(_ b: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(b), countStyle: .file)
