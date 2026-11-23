@@ -62,7 +62,7 @@ struct WidgetView: View {
 
     private var compact: some View {
         HStack(spacing: 4) {
-            ForEach(Metric.allCases) { metric in
+            ForEach(Metric.ringMetrics) { metric in
                 Ring(value: m.value(metric), label: metric.title, detail: compactDetail(metric), color: metric.tint)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -82,6 +82,8 @@ struct WidgetView: View {
         case .gpu: m.gpuCores > 0 ? "\(m.gpuCores) cores" : "GPU"
         case .memory: fmtBytes(m.memory.used)
         case .storage: m.rootVolume.map { "\(fmtDisk($0.available)) free" } ?? "–"
+        case .network: "↓ \(fmtRate(m.network.downRate))"
+        case .battery: m.battery.charging ? "Charging" : pct(m.battery.level)
         }
     }
 

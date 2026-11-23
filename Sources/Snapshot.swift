@@ -16,9 +16,10 @@ enum Snapshot {
             MainActor.assumeIsolated {
                 let m = Monitor()
                 monitor = m
+                for k in Metric.allCases { m.setDetailVisible(k, true) }   // fill the per-app lists
                 // Let a few samples accumulate so graphs have data.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-                    MainActor.assumeIsolated { render(m, to: dir); exit(0) }
+                    MainActor.assumeIsolated { render(m, to: dir); m.stopStreams(); exit(0) }
                 }
             }
         }
@@ -39,13 +40,13 @@ enum Snapshot {
                  dir.appendingPathComponent("panel-expanded-\(suffix).png"))
 
             save(HStack(spacing: 4) {
-                ForEach(Metric.allCases) { k in
+                ForEach(Metric.ringMetrics) { k in
                     Ring(value: m.value(k), label: k.title, detail: "", color: k.tint)
                 }
             }.padding(16).frame(width: 340), m, scheme, bg, dir.appendingPathComponent("widget-compact-\(suffix).png"))
         }
         // Menu bar label styles
-        let items = Metric.allCases.map { LabelItem(metric: $0, value: m.value($0), history: m.history($0)) }
+        let items = Metric.menuBarMetrics.map { LabelItem.make($0, m) }
         save(VStack(alignment: .leading, spacing: 8) {
             ForEach(MenuStyle.allCases) { style in
                 HStack {

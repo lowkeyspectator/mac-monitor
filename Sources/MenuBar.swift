@@ -19,27 +19,53 @@ enum MenuStyle: String, CaseIterable, Identifiable {
 
 struct LabelItem: Identifiable {
     var metric: Metric, value: Double, history: [Double]
+    var up: Double = 0, down: Double = 0          // network only, bytes/s
     var id: String { metric.rawValue }
+
+    @MainActor static func make(_ metric: Metric, _ m: Monitor) -> LabelItem {
+        LabelItem(metric: metric, value: m.value(metric), history: m.history(metric),
+                  up: m.network.upRate, down: m.network.downRate)
+    }
+}
+
+/// Compact rate for the menu bar: "1.2M", "340K", "0K".
+func fmtRateShort(_ bps: Double) -> String {
+    switch bps {
+    case 1_000_000_000...: String(format: "%.1fG", bps / 1e9)
+    case 10_000_000...: "\(Int(bps / 1e6))M"
+    case 1_000_000...: String(format: "%.1fM", bps / 1e6)
+    default: "\(Int(bps / 1e3))K"
+    }
 }
 
 struct StatusLabel: View {
     @ObservedObject var m: Monitor
+    @Environment(\.openSettings) private var openSettings
     @AppStorage("mb.cpu") private var cpu = true
     @AppStorage("mb.gpu") private var gpu = true
     @AppStorage("mb.memory") private var memory = true
-    @AppStorage("mb.storage") private var storage = false
+    @AppStorage("mb.storage") private var storage = true
+    @AppStorage("mb.network") private var network = true
+    @AppStorage("mb.battery") private var batteryOn = true
     @AppStorage("mb.style") private var style = MenuStyle.icon.rawValue
 
     var body: some View {
-        let on: [Metric: Bool] = [.cpu: cpu, .gpu: gpu, .memory: memory, .storage: storage]
-        let items = Metric.allCases.filter { on[$0] == true }
-            .map { LabelItem(metric: $0, value: m.value($0), history: m.history($0)) }
-        if items.isEmpty {
-            Image(systemName: "gauge.with.dots.needle.50percent")
-        } else if let img = renderStatusImage(items: items, style: MenuStyle(rawValue: style) ?? .icon) {
-            Image(nsImage: img)
-        } else {
-            Text(items.map { "\($0.metric.shortName) \(pct($0.value))" }.joined(separator: " "))
+        let on: [Metric: Bool] = [.cpu: cpu, .gpu: gpu, .memory: memory, .storage: storage,
+                                  .network: network, .battery: batteryOn]
+        let items = Metric.menuBarMetrics.filter { on[$0] == true && ($0 != .battery || m.battery.present) }
+            .map { LabelItem.make($0, m) }
+        Group {
+            if items.isEmpty {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+            } else if let img = renderStatusImage(items: items, style: MenuStyle(rawValue: style) ?? .icon) {
+                Image(nsImage: img)
+            } else {
+                Text(items.map { "\($0.metric.shortName) \(pct($0.value))" }.joined(separator: " "))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showMacMonitorSettings)) { _ in
+            NSApp.activate()
+            openSettings()
         }
     }
 }
@@ -68,7 +94,19 @@ struct StatusLabelContent: View {
 
     @ViewBuilder private func cell(_ item: LabelItem) -> some View {
         let value = Text(pct(item.value)).monospacedDigit()
-        switch style {
+        if item.metric == .network {
+            // Upload over download, like Stats and iStat Menus; same in every style.
+            HStack(spacing: 2) {
+                if style == .icon { Image(systemName: "network").font(.system(size: 10, weight: .medium)) }
+                VStack(alignment: .trailing, spacing: -2) {
+                    Text("\(fmtRateShort(item.up)) ↑")
+                    Text("\(fmtRateShort(item.down)) ↓")
+                }
+                .font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                .frame(minWidth: 34, alignment: .trailing)
+            }
+        } else {
+            switch style {
         case .percent:
             value.font(.system(size: 12, weight: .medium))
         case .icon:
@@ -100,6 +138,7 @@ struct StatusLabelContent: View {
                 }
             }
         }
+        }
     }
 
     private func stacked(_ item: LabelItem, _ value: Text) -> some View {
@@ -124,6 +163,8 @@ struct MenuPanel: View {
     @AppStorage("popover.gpu") private var gpuOpen = false
     @AppStorage("popover.memory") private var memoryOpen = false
     @AppStorage("popover.storage") private var storageOpen = false
+    @AppStorage("popover.network") private var networkOpen = false
+    @AppStorage("popover.battery") private var batteryOpen = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -139,7 +180,9 @@ struct MenuPanel: View {
     }
 
     private var header: some View {
-        let allOpen = cpuOpen && gpuOpen && memoryOpen && storageOpen
+        let open: [Metric: Bool] = [.cpu: cpuOpen, .gpu: gpuOpen, .memory: memoryOpen,
+                                    .storage: storageOpen, .network: networkOpen, .battery: batteryOpen]
+        let allOpen = m.panelMetrics.allSatisfy { open[$0] == true }
         return HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Mac Monitor").font(.system(size: 13, weight: .semibold))

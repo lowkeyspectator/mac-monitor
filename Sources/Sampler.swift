@@ -132,6 +132,25 @@ final class Monitor: ObservableObject {
     @Published var memHistory: [Double] = []
     @Published var memory = MemoryInfo()
     @Published var volumes: [VolumeInfo] = []
+    @Published var diskReadRate: Double = 0      // bytes/s
+    @Published var diskWriteRate: Double = 0
+    @Published var diskReadHistory: [Double] = []
+    @Published var diskWriteHistory: [Double] = []
+    @Published var network = NetworkInfo()
+    @Published var netDownHistory: [Double] = []
+    @Published var netUpHistory: [Double] = []
+    // Per-app usage, collected only while that card's details are expanded and on screen.
+    @Published var topCPU: [UsageRow] = []
+    @Published var topMemory: [UsageRow] = []
+    @Published var topGPU: [UsageRow] = []
+    @Published var topDisk: [UsageRow] = []
+    @Published var topNetwork: [UsageRow] = []
+    @Published var topEnergy: [UsageRow] = []
+    @Published var battery = BatteryInfo()
+    @Published var system = SystemInfo()
+
+    /// Called after every sample (used by the alert engine).
+    var onSample: ((Monitor) -> Void)?
 
     let cpuName = Sys.sysctlString("machdep.cpu.brand_string") ?? "CPU"
     let coreGroups: [CoreGroup] = {
@@ -147,6 +166,54 @@ final class Monitor: ObservableObject {
     private var lastTicks: [CPUTicks] = []
     private var timer: Timer?
     private var lastVolumeRefresh = Date.distantPast
+    private var lastSampleTime = Date()
+    private var lastNet: (iface: String, rx: UInt64, tx: UInt64)?
+    private var lastDisk: (read: UInt64, write: UInt64)?
+    private var lastSlowRefresh = Date.distantPast     // battery, processes, IP
+    private var processesInFlight = false
+    private var detailRefs: [Metric: Int] = [:]
+    private var lastGPUTimes: [Int32: (name: String, ns: UInt64)] = [:]
+    private var lastDiskTotals: [Int32: (read: UInt64, write: UInt64)] = [:]
+    private var lastPerProcessTime = Date()
+    // nettop: two samples 2 s apart, delta mode; repeated while the Network card is open.
+    private lazy var netStream = RepeatingCommand(
+        "/usr/bin/nettop", ["-P", "-d", "-x", "-L", "2", "-s", "2", "-J", "bytes_in,bytes_out"],
+        onOutput: { [weak self] lines in
+            let rows = Array(NetProcessParser.parse(NetProcessParser.lastBlock(lines), seconds: 2).prefix(5))
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.topNetwork = rows } }
+        })
+    private lazy var energyStream = StreamCollector(
+        "/usr/bin/top", ["-l", "0", "-s", "3", "-n", "8", "-o", "power", "-stats", "pid,command,power"],
+        isHeader: { $0.hasPrefix("Processes:") },
+        onBlock: { [weak self] lines in
+            let rows = Array(EnergyParser.parse(lines).prefix(5))
+            DispatchQueue.main.async { MainActor.assumeIsolated { if !rows.isEmpty { self?.topEnergy = rows } } }
+        })
+
+    /// Cards call this as their details appear and disappear. Per-app collection runs only while visible.
+    func setDetailVisible(_ metric: Metric, _ visible: Bool) {
+        let n = max(0, (detailRefs[metric] ?? 0) + (visible ? 1 : -1))
+        detailRefs[metric] = n
+        switch metric {
+        case .network: n > 0 ? netStream.start() : netStream.stop()
+        case .battery: n > 0 ? energyStream.start() : energyStream.stop()
+        default: break
+        }
+        if visible { lastSlowRefresh = .distantPast }     // load the list right away
+        if n == 0 {
+            switch metric {
+            case .network: topNetwork = []
+            case .battery: topEnergy = []
+            case .gpu: lastGPUTimes = [:]; topGPU = []
+            case .storage: lastDiskTotals = [:]; topDisk = []
+            default: break
+            }
+        }
+    }
+
+    private func detailVisible(_ m: Metric) -> Bool { (detailRefs[m] ?? 0) > 0 }
+
+    func stopStreams() { netStream.stop(); energyStream.stop() }
 
     private var interval: Double = 0
 
@@ -157,6 +224,12 @@ final class Monitor: ObservableObject {
         reschedule()
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reschedule() }
+        }
+        if !Snapshot.isActive { AlertEngine.shared.attach(self) }
+        // Stop the nettop/top helpers when the app quits so they don't outlive it.
+        NotificationCenter.default.addObserver(forName: Notification.Name("NSApplicationWillTerminateNotification"),
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopStreams() }
         }
     }
 
@@ -227,6 +300,123 @@ final class Monitor: ObservableObject {
         if Date().timeIntervalSince(lastVolumeRefresh) >= 10 {
             volumes = Self.readVolumes()
             lastVolumeRefresh = Date()
+        }
+
+        let now0 = Date()
+        let dt = max(0.1, now0.timeIntervalSince(lastSampleTime))
+        lastSampleTime = now0
+
+        // Disk throughput
+        let disk = DiskIOReader.totals()
+        if let last = lastDisk {
+            diskReadRate = Double(disk.read &- last.read) / dt
+            diskWriteRate = Double(disk.write &- last.write) / dt
+            if disk.read < last.read || disk.write < last.write { diskReadRate = 0; diskWriteRate = 0 }
+        }
+        lastDisk = disk
+        push(diskReadRate, to: &diskReadHistory)
+        push(diskWriteRate, to: &diskWriteHistory)
+
+        // Network throughput on the primary interface
+        var net = network
+        let iface = NetReader.primaryInterface() ?? ""
+        net.interface = iface
+        if let c = NetReader.counters()[iface] {
+            if let last = lastNet, last.iface == iface {
+                // Counters are 32-bit for unprivileged apps and wrap every 4 GB.
+                let drx = UInt32(truncatingIfNeeded: c.rx) &- UInt32(truncatingIfNeeded: last.rx)
+                let dtx = UInt32(truncatingIfNeeded: c.tx) &- UInt32(truncatingIfNeeded: last.tx)
+                net.downRate = Double(drx) / dt
+                net.upRate = Double(dtx) / dt
+            } else {
+                net.downRate = 0; net.upRate = 0
+            }
+            lastNet = (iface, c.rx, c.tx)
+        } else {
+            net.downRate = 0; net.upRate = 0; lastNet = nil
+        }
+        push(net.downRate, to: &netDownHistory)
+        push(net.upRate, to: &netUpHistory)
+
+        // Slower things every 3 s: IP, battery, system, processes
+        if now0.timeIntervalSince(lastSlowRefresh) >= 3 {
+            lastSlowRefresh = now0
+            net.localIP = iface.isEmpty ? "" : NetReader.ipv4(of: iface)
+            battery = BatteryReader.read()
+            system = SystemReader.read()
+            refreshPerProcess(interface: iface)
+        }
+        network = net
+
+        onSample?(self)
+    }
+
+    /// Per-app lists for whichever cards are expanded, gathered off the main thread:
+    /// `ps` for CPU and memory, the GPU driver for GPU time, rusage for disk I/O, and
+    /// `netstat` for 64-bit network totals. Network and energy lists come from streams.
+    private func refreshPerProcess(interface: String) {
+        let wantPS = detailVisible(.cpu) || detailVisible(.memory)
+        let wantGPU = detailVisible(.gpu), wantDisk = detailVisible(.storage)
+        let wantTotals = detailVisible(.network) && !interface.isEmpty
+        guard wantPS || wantGPU || wantDisk || wantTotals, !processesInFlight else { return }
+        processesInFlight = true
+        let prevGPU = lastGPUTimes, prevDisk = lastDiskTotals
+        let elapsed = max(0.5, Date().timeIntervalSince(lastPerProcessTime))
+        lastPerProcessTime = Date()
+        DispatchQueue.global(qos: .utility).async {
+            let totals = wantTotals ? NetReader.totals(of: interface) : nil
+            var byCPU: [UsageRow] = [], byMem: [UsageRow] = []
+            if wantPS {
+                let list = ProcessReader.snapshot()
+                byCPU = list.sorted { $0.cpu > $1.cpu }.prefix(5)
+                    .map { UsageRow(pid: $0.pid, name: $0.name, value: $0.cpu, text: pct($0.cpu)) }
+                byMem = list.sorted { $0.memory > $1.memory }.prefix(5)
+                    .map { UsageRow(pid: $0.pid, name: $0.name, value: Double($0.memory), text: fmtBytes($0.memory)) }
+            }
+            var gpuTimes: [Int32: (name: String, ns: UInt64)] = [:], gpuRows: [UsageRow] = []
+            if wantGPU {
+                gpuTimes = GPUProcessReader.times()
+                if !prevGPU.isEmpty {
+                    gpuRows = gpuTimes.compactMap { pid, cur in
+                        guard let old = prevGPU[pid], cur.ns > old.ns else { return nil }
+                        let share = min(1, Double(cur.ns - old.ns) / (elapsed * 1e9))
+                        return share >= 0.001 ? UsageRow(pid: pid, name: processName(pid) ?? cur.name,
+                                                         value: share, text: pct(share)) : nil
+                    }
+                    .sorted { $0.value > $1.value }.prefix(5).map { $0 }
+                }
+            }
+            var diskTotals: [Int32: (read: UInt64, write: UInt64)] = [:], diskRows: [UsageRow] = []
+            if wantDisk {
+                diskTotals = DiskProcessReader.totals()
+                if !prevDisk.isEmpty {
+                    diskRows = diskTotals.compactMap { pid, cur in
+                        guard let old = prevDisk[pid], cur.read >= old.read, cur.write >= old.write else { return nil }
+                        let r = Double(cur.read - old.read) / elapsed, w = Double(cur.write - old.write) / elapsed
+                        guard r + w >= 1000, let name = processName(pid) else { return nil }
+                        return UsageRow(pid: pid, name: name, value: r + w, text: "R \(fmtRate(r))  W \(fmtRate(w))")
+                    }
+                    .sorted { $0.value > $1.value }.prefix(5).map { $0 }
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if wantPS { self.topCPU = byCPU; self.topMemory = byMem }
+                    if wantGPU && self.detailVisible(.gpu) {
+                        self.lastGPUTimes = gpuTimes
+                        if !prevGPU.isEmpty { self.topGPU = gpuRows }
+                    }
+                    if wantDisk && self.detailVisible(.storage) {
+                        self.lastDiskTotals = diskTotals
+                        if !prevDisk.isEmpty { self.topDisk = diskRows }
+                    }
+                    if let totals, self.network.interface == interface {
+                        self.network.totalDown = totals.rx
+                        self.network.totalUp = totals.tx
+                    }
+                    self.processesInFlight = false
+                }
+            }
         }
     }
 
